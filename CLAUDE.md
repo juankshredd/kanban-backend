@@ -25,10 +25,11 @@ Config is loaded via `dotenv` from a `.env` file (gitignored) at the project roo
 
 Standard layered Express structure under `src/`:
 
-- `server.js` — app entry point; wires up CORS, JSON body parsing, and mounts route modules at `/api/auth`, `/api/tasks`, `/api/users`. Exports the `app` instance (used directly by Supertest in tests, no separate `app.js`).
+- `server.js` — app entry point; wires up CORS, JSON body parsing, and mounts route modules at `/api/auth`, `/api/tasks`, `/api/users`, `/api/projects`. Exports the `app` instance (used directly by Supertest in tests, no separate `app.js`).
 - `db.js` — single shared `pg` `Pool` instance, imported by controllers directly (no query-builder/ORM layer).
-- `routes/*.js` — thin route definitions that wire an Express `Router` to middleware + controller functions.
-- `middlewares/authMiddleware.js` — verifies the `Authorization: Bearer <token>` JWT (signed with `JWT_SECRET`), attaches the decoded payload (`{ id }`) to `req.user`. All task and user routes require this.
+- `routes/*.js` — thin route definitions that wire an Express `Router` to middleware + controller functions. `projectRoutes.js` applies `authMiddleware` once via `router.use(...)` rather than per route, so nested routers mounted under `/:projectId` inherit it.
+- `middlewares/authMiddleware.js` — verifies the `Authorization: Bearer <token>` JWT (signed with `JWT_SECRET`), attaches the decoded payload (`{ id }`) to `req.user`. All task, user and project routes require this.
+- `middlewares/projectAccess.js` — `requireProjectMember` / `requireProjectOwner`. Both read `:projectId` from the route, confirm the JWT user is a member of that project, and attach `req.project` + `req.projectRole`. **This is the authorization pattern for anything scoped to a project** — mount one of these on the route instead of re-checking membership inside each controller. Non-members get `404` (not `403`) so project existence isn't leaked; a member who lacks OWNER gets `403`.
 - `middlewares/validateRegister.js` — request-body validation for registration, applied only to `POST /api/auth/register`.
 - `controllers/*.js` — route handlers containing business logic; talk to Postgres directly via raw parameterized SQL through `pool.query(...)`.
 
@@ -53,9 +54,17 @@ Schema changes live in `migrations/*.sql`, applied in filename order by `scripts
 
 Registration hashes passwords with bcrypt and rejects duplicate emails. Login checks `is_active = true`, verifies the bcrypt hash, and issues a JWT (`{ id: user.id }`, 1h expiry) signed with `JWT_SECRET`. There is commented-out (unimplemented) logic in `authController.js` for rate-limiting failed login attempts — not currently enforced.
 
+### Project rules
+
+Projects are the container for the board, backlog, sprints and retrospectives. `POST /api/projects` creates the project and its creator's `OWNER` membership in a single transaction — a project without an owner would be unreachable even to its creator. If `key` is omitted it is derived from the name (`"Mi Tablero"` → `MIT`, then `MIT2`…); if supplied it is upper-cased and must match `^[A-Z][A-Z0-9]{1,9}$`.
+
+A project's `key` is deliberately **not** editable via `PATCH` — it is the prefix of every ticket id already handed out. Deleting a project cascades to its tasks and members, so it returns `409` when the project still has tasks unless `?force=true` is passed. The last `OWNER` of a project can be neither demoted nor removed.
+
 ### Task ownership rules
 
 All task endpoints scope queries by `user_id` from the verified JWT (`req.user.id`) — tasks are never fetched or mutated across users. Task deletion is restricted: only tasks with `status = 'TODO'` can be deleted (`taskController.js`).
+
+Note this is the *pre-projects* rule and is being migrated: ownership is moving to project membership (`projectAccess.js`), where any member of a project can work on its tasks. `taskController.js` has not been converted yet.
 
 ## Testing notes
 
