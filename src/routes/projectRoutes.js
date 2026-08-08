@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const authMiddleware = require('../middlewares/authMiddleware');
 const { requireProjectMember, requireProjectOwner } = require('../middlewares/projectAccess');
+const projectTaskRoutes = require('./projectTaskRoutes');
 const {
   createProject,
   getProjects,
@@ -28,9 +29,9 @@ router.post('/:projectId/members', requireProjectOwner, addProjectMember);
 router.patch('/:projectId/members/:userId', requireProjectOwner, updateProjectMemberRole);
 router.delete('/:projectId/members/:userId', requireProjectOwner, removeProjectMember);
 
-// Acá se cuelga el contenido del proyecto (tareas, sprints, retro) a medida que
-// se vaya implementando, con router({ mergeParams: true }) para que el router
-// hijo también vea :projectId. Ej:
-//   router.use('/:projectId/tasks', requireProjectMember, projectTaskRoutes);
+// Contenido del proyecto. El chequeo de membresía se hace una sola vez acá y
+// los routers hijos lo dan por hecho; los que vengan (sprints, retro) se montan
+// igual, con router({ mergeParams: true }) para ver el :projectId.
+router.use('/:projectId/tasks', requireProjectMember, projectTaskRoutes);
 
 module.exports = router;

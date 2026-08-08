@@ -27,9 +27,12 @@ Standard layered Express structure under `src/`:
 
 - `server.js` — app entry point; wires up CORS, JSON body parsing, and mounts route modules at `/api/auth`, `/api/tasks`, `/api/users`, `/api/projects`. Exports the `app` instance (used directly by Supertest in tests, no separate `app.js`).
 - `db.js` — single shared `pg` `Pool` instance, imported by controllers directly (no query-builder/ORM layer).
-- `routes/*.js` — thin route definitions that wire an Express `Router` to middleware + controller functions. `projectRoutes.js` applies `authMiddleware` once via `router.use(...)` rather than per route, so nested routers mounted under `/:projectId` inherit it.
+- `routes/*.js` — thin route definitions that wire an Express `Router` to middleware + controller functions. `projectRoutes.js` applies `authMiddleware` once via `router.use(...)` rather than per route, so nested routers mounted under `/:projectId` inherit it. `projectTaskRoutes.js` is mounted there behind `requireProjectMember` with `Router({ mergeParams: true })` and therefore declares no access middleware of its own — that is the pattern for future project-scoped routers (sprints, retro).
 - `middlewares/authMiddleware.js` — verifies the `Authorization: Bearer <token>` JWT (signed with `JWT_SECRET`), attaches the decoded payload (`{ id }`) to `req.user`. All task, user and project routes require this.
-- `middlewares/projectAccess.js` — `requireProjectMember` / `requireProjectOwner`. Both read `:projectId` from the route, confirm the JWT user is a member of that project, and attach `req.project` + `req.projectRole`. **This is the authorization pattern for anything scoped to a project** — mount one of these on the route instead of re-checking membership inside each controller. Non-members get `404` (not `403`) so project existence isn't leaked; a member who lacks OWNER gets `403`.
+- `middlewares/projectAccess.js` — all project authorization. Each variant differs only in where the project id comes from, and all attach `req.project` + `req.projectRole`. **This is the authorization pattern for anything scoped to a project** — mount one of these on the route instead of re-checking membership inside each controller. Non-members get `404` (not `403`) so project existence isn't leaked; a member who lacks OWNER gets `403`.
+  - `requireProjectMember` / `requireProjectOwner` — id from `req.params.projectId`.
+  - `requireProjectMemberFromBody` — id from `req.body.project_id`, for cross-project endpoints like `POST /api/tasks`.
+  - `requireProjectMemberForResource(table)` — id resolved by looking up the resource itself, for `PATCH`/`DELETE /api/tasks/:id`. A factory so sprints and retro notes reuse it; `table` comes from the `PROJECT_SCOPED_TABLES` whitelist, never from the request.
 - `middlewares/validateRegister.js` — request-body validation for registration, applied only to `POST /api/auth/register`.
 - `controllers/*.js` — route handlers containing business logic; talk to Postgres directly via raw parameterized SQL through `pool.query(...)`.
 
@@ -48,7 +51,7 @@ Schema changes live in `migrations/*.sql`, applied in filename order by `scripts
 
 **Ticket IDs** (`KAN-42`) are *derived*, not stored: `project.key || '-' || task.ticket_number`. `ticket_number` must be assigned atomically via `UPDATE projects SET next_ticket_number = next_ticket_number + 1 ... RETURNING next_ticket_number - 1`, never via `MAX(ticket_number)+1` (races between concurrent users).
 
-**In-flight migration:** `tasks.project_id` / `tasks.ticket_number` are still nullable and `taskController.js` does not write them yet. They become `NOT NULL` in a later migration, together with the controller change that always assigns a project (expand/contract). Existing rows were backfilled into one auto-created project per user by `004_backfill_default_projects.sql`.
+Existing rows were backfilled into one auto-created project per user by `004_backfill_default_projects.sql`; `006` closed the expand/contract by making both columns `NOT NULL`.
 
 ### Auth flow
 
@@ -60,11 +63,14 @@ Projects are the container for the board, backlog, sprints and retrospectives. `
 
 A project's `key` is deliberately **not** editable via `PATCH` — it is the prefix of every ticket id already handed out. Deleting a project cascades to its tasks and members, so it returns `409` when the project still has tasks unless `?force=true` is passed. The last `OWNER` of a project can be neither demoted nor removed.
 
-### Task ownership rules
+### Task rules
 
-All task endpoints scope queries by `user_id` from the verified JWT (`req.user.id`) — tasks are never fetched or mutated across users. Task deletion is restricted: only tasks with `status = 'TODO'` can be deleted (`taskController.js`).
+Tasks are authorized by **project membership**, not by `tasks.user_id` (which is now just who created it). Any member of a project can read and mutate its tasks. There are two route families, both served by the same `taskController.js` handlers:
 
-Note this is the *pre-projects* rule and is being migrated: ownership is moving to project membership (`projectAccess.js`), where any member of a project can work on its tasks. `taskController.js` has not been converted yet.
+- `/api/projects/:projectId/tasks` — canonical, the board of one project. Behind `requireProjectMember`.
+- `/api/tasks` — cross-project. `GET` is the "my work" view across every project the user belongs to (optional `?project_id=`), `POST` requires `project_id` in the body, and `PATCH`/`DELETE /:id` resolve the project from the task itself.
+
+Handlers read the project from `req.project.id` and scope every query with `WHERE id = $1 AND project_id = $2`, so a task from another project can't be reached through a project you do belong to. `PATCH` accepts `status` and/or `type` (at least one). Deletion is still restricted to tasks with `status = 'TODO'`.
 
 ## Testing notes
 
