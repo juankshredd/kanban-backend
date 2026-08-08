@@ -3,6 +3,7 @@ const router = express.Router();
 const authMiddleware = require('../middlewares/authMiddleware');
 const { requireProjectMember, requireProjectOwner } = require('../middlewares/projectAccess');
 const projectTaskRoutes = require('./projectTaskRoutes');
+const projectSprintRoutes = require('./projectSprintRoutes');
 const {
   createProject,
   getProjects,
@@ -33,5 +34,6 @@ router.delete('/:projectId/members/:userId', requireProjectOwner, removeProjectM
 // los routers hijos lo dan por hecho; los que vengan (sprints, retro) se montan
 // igual, con router({ mergeParams: true }) para ver el :projectId.
 router.use('/:projectId/tasks', requireProjectMember, projectTaskRoutes);
+router.use('/:projectId/sprints', requireProjectMember, projectSprintRoutes);
 
 module.exports = router;

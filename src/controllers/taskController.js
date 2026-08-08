@@ -28,6 +28,7 @@ const TASK_SELECT = `
     t.status,
     t.type,
     t.project_id,
+    t.sprint_id,
     p.key AS project_key,
     p.name AS project_name,
     t.user_id,
@@ -136,6 +137,17 @@ const buildTaskFilters = (query, values) => {
     filters.push(`t.type = $${values.length}`);
   }
 
+  // sprint_id=backlog es la palabra clave para "sin sprint asignado", porque
+  // NULL no se puede mandar como valor de query string.
+  if (query.sprint_id !== undefined) {
+    if (query.sprint_id === 'backlog') {
+      filters.push('t.sprint_id IS NULL');
+    } else {
+      values.push(query.sprint_id);
+      filters.push(`t.sprint_id = $${values.length}`);
+    }
+  }
+
   return { filters };
 };
 
@@ -164,6 +176,11 @@ const getProjectTasks = async (req, res) => {
     res.status(200).json(tasks.rows);
 
   } catch (error) {
+    // uuid mal formado en el filtro sprint_id
+    if (error.code === '22P02') {
+      return res.status(400).json({ message: 'Invalid sprint_id' });
+    }
+
     console.error("GET PROJECT TASKS ERROR:", error);
     res.status(500).json({ message: 'Server error' });
   }
@@ -202,9 +219,9 @@ const getMyTasks = async (req, res) => {
     res.status(200).json(tasks.rows);
 
   } catch (error) {
-    // uuid mal formado en el filtro project_id
+    // uuid mal formado en el filtro project_id o sprint_id
     if (error.code === '22P02') {
-      return res.status(400).json({ message: 'Invalid project_id' });
+      return res.status(400).json({ message: 'Invalid project_id or sprint_id' });
     }
 
     console.error("GET MY TASKS ERROR:", error);
@@ -213,15 +230,19 @@ const getMyTasks = async (req, res) => {
 };
 
 // ----------------------------
-// Actualizar una tarea (status y/o type)
+// Actualizar una tarea (status, type y/o sprint_id)
 // ----------------------------
 const updateTask = async (req, res) => {
   const project_id = req.project.id;
   const { id } = req.params;
   const { status, type } = req.body;
+  // 'sprint_id' in body distingue "no lo mandaron" de "lo mandaron en null"
+  // (mover a Backlog), que un simple !== undefined no puede.
+  const hasSprintId = Object.prototype.hasOwnProperty.call(req.body, 'sprint_id');
+  const { sprint_id } = req.body;
 
-  if (status === undefined && type === undefined) {
-    return res.status(400).json({ message: 'Nothing to update: send status and/or type' });
+  if (status === undefined && type === undefined && !hasSprintId) {
+    return res.status(400).json({ message: 'Nothing to update: send status, type and/or sprint_id' });
   }
 
   const updates = [];
@@ -247,6 +268,34 @@ const updateTask = async (req, res) => {
 
     values.push(typeNormalized);
     updates.push(`type = $${values.length}`);
+  }
+
+  if (hasSprintId) {
+    if (sprint_id === null) {
+      // Mover al Backlog.
+      updates.push('sprint_id = NULL');
+    } else {
+      // El sprint tiene que ser del mismo proyecto: si no, una tarea podría
+      // terminar apuntando al sprint de un proyecto ajeno.
+      try {
+        const sprint = await pool.query(
+          `SELECT id FROM sprints WHERE id = $1 AND project_id = $2;`,
+          [sprint_id, project_id]
+        );
+
+        if (sprint.rows.length === 0) {
+          return res.status(400).json({ message: 'sprint_id does not belong to this project' });
+        }
+      } catch (error) {
+        if (error.code === '22P02') {
+          return res.status(400).json({ message: 'Invalid sprint_id' });
+        }
+        throw error;
+      }
+
+      values.push(sprint_id);
+      updates.push(`sprint_id = $${values.length}`);
+    }
   }
 
   updates.push('updated_at = CURRENT_TIMESTAMP');
