@@ -1,0 +1,37 @@
+const express = require('express');
+const router = express.Router();
+const authMiddleware = require('../middlewares/authMiddleware');
+const { requireProjectMember, requireProjectOwner } = require('../middlewares/projectAccess');
+const projectTaskRoutes = require('./projectTaskRoutes');
+const {
+  createProject,
+  getProjects,
+  getProjectById,
+  updateProject,
+  deleteProject,
+  addProjectMember,
+  updateProjectMemberRole,
+  removeProjectMember
+} = require('../controllers/projectController');
+
+// Se aplica una vez para todo el router (incluidos los routers anidados que se
+// monten más adelante bajo /:projectId) en lugar de repetirlo ruta por ruta.
+router.use(authMiddleware);
+
+router.post('/', createProject);
+router.get('/', getProjects);
+
+router.get('/:projectId', requireProjectMember, getProjectById);
+router.patch('/:projectId', requireProjectOwner, updateProject);
+router.delete('/:projectId', requireProjectOwner, deleteProject);
+
+router.post('/:projectId/members', requireProjectOwner, addProjectMember);
+router.patch('/:projectId/members/:userId', requireProjectOwner, updateProjectMemberRole);
+router.delete('/:projectId/members/:userId', requireProjectOwner, removeProjectMember);
+
+// Contenido del proyecto. El chequeo de membresía se hace una sola vez acá y
+// los routers hijos lo dan por hecho; los que vengan (sprints, retro) se montan
+// igual, con router({ mergeParams: true }) para ver el :projectId.
+router.use('/:projectId/tasks', requireProjectMember, projectTaskRoutes);
+
+module.exports = router;
