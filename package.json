@@ -8,7 +8,8 @@
     "start": "node src/server.js",
     "dev": "node src/server.js",
     "migrate": "node scripts/migrate.js",
-    "migrate:status": "node scripts/migrate.js status"
+    "migrate:status": "node scripts/migrate.js status",
+    "seed:test": "node scripts/seedTestUser.js"
   },
   "keywords": [],
   "author": "",
