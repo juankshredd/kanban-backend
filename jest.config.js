@@ -3,5 +3,6 @@ module.exports = {
   collectCoverage: true,
   coverageDirectory: 'coverage',
   testMatch: ['**/src/**/*.test.js'],
-  verbose: true
+  verbose: true,
+  forceExit: true
 };
