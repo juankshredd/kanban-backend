@@ -101,6 +101,8 @@ Handlers read the project from `req.project.id` and scope every query with `WHER
 `sprintController.js` / `projectSprintRoutes.js`, mounted at `/api/projects/:projectId/sprints`. Any project member can create/start/complete/delete sprints — unlike project membership management, this isn't OWNER-gated.
 
 - `POST /` creates a sprint in `PLANNED`.
+- `GET /:sprintId` returns a single sprint (`404` if it isn't found in the project); mounted after `GET /active` in `projectSprintRoutes.js` so `"active"` doesn't get swallowed by the `:sprintId` param.
+- `PATCH /:sprintId` updates `name`/`goal`/`start_date`/`end_date` only (same "at least one field, `undefined` vs `null` distinguishes unset vs. clear" pattern as `updateCompany`/`updateProject`). `status` is deliberately **not** editable here — it only changes through `/start` and `/complete`, which also move tasks and respect `one_active_sprint_per_project`.
 - `PATCH /:sprintId/start` moves `PLANNED` → `ACTIVE`; `400` if the sprint isn't `PLANNED`, `409` if another sprint in the project is already `ACTIVE` (caught from the unique-index violation, not pre-checked).
 - `PATCH /:sprintId/complete` moves `ACTIVE` → `COMPLETED` and, in the same transaction, sets `sprint_id = NULL` on every non-`DONE` task in that sprint (returned as `moved_to_backlog`) — finished work stays attached to the sprint as history, unfinished work returns to the Backlog instead of being stranded on a closed sprint.
 - `DELETE /:sprintId` only allowed while still `PLANNED` — deleting an `ACTIVE`/`COMPLETED` sprint would silently scatter its tasks to the Backlog via `ON DELETE SET NULL`; `completeSprint` is the explicit, auditable way to do that instead.
@@ -115,3 +117,13 @@ Handlers read the project from `req.project.id` and scope every query with `WHER
 ## Testing notes
 
 `src/sample.test.js` uses Supertest against the exported `app` and hits the **real** configured Postgres database (no mocking/test DB isolation) — e.g. the happy-path login test depends on a seeded user (`nuevo@mail.com` / `123456`) actually existing in the database. Keep this in mind when adding or running tests: they are integration tests requiring a live, seeded DB connection via the `.env` config, not pure unit tests.
+
+### Controller unit tests (mandatory)
+
+Every controller in `src/controllers/` has a sibling `*.test.js` (e.g. `companyController.js` → `companyController.test.js`) of **unit** tests — distinct from `sample.test.js` above: no Express, no Supertest, no real DB. `src/db.js` is replaced with `jest.mock('../db', () => ({ connect: jest.fn(), query: jest.fn() }))`, and each handler is called directly with a hand-built `req`/`res` (`res.status`/`res.json` as `jest.fn().mockReturnValue(res)` so they chain). Handlers that use a transaction (`pool.connect()`) get a fake `client` (`{ query: jest.fn(), release: jest.fn() }`) returned from `pool.connect.mockResolvedValue(client)`, with `client.query` mocked once per statement in call order (`BEGIN`, the actual queries, `COMMIT`).
+
+**Rule: every new exported controller function must ship with at least 1 happy-path test and 1 negative test in the same commit**, following the existing pattern in that controller's test file (see any `describe('controllerName.functionName', ...)` block for the shape to copy). No commit — and no push to a shared branch (`dev`/`master`) — should introduce a new controller function without matching tests. This is deliberately unit-level and fast (no DB dependency) so it's cheap to run on every change; it complements, not replaces, `sample.test.js`-style integration coverage for critical end-to-end flows.
+
+### CI
+
+`.github/workflows/ci.yml` runs the full Jest suite (unit + `sample.test.js` integration test) on every push and pull request targeting `master` or `dev`, against a real ephemeral `postgres:16` service container — it applies migrations (`npm run migrate`) and seeds the integration test user (`npm run seed:test`) before running `npx jest`, so both test styles run for real in CI, not just locally. Coverage is uploaded as a build artifact. Treat a failing "Test" check as a hard blocker for merging, same as the no-tests-no-commit rule above.
