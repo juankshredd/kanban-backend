@@ -20,7 +20,7 @@ const SPRINT_SELECT = `
 // ----------------------------
 const createSprint = async (req, res) => {
   const project_id = req.project.id;
-  const { name, goal, start_date, end_date } = req.body;
+  const { name, goal, start_date, end_date } = req.body || {};
 
   if (!name || typeof name !== 'string' || !name.trim()) {
     return res.status(400).json({ message: 'Name is required' });
