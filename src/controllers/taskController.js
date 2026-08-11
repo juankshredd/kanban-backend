@@ -29,6 +29,7 @@ const TASK_SELECT = `
     t.type,
     t.project_id,
     t.sprint_id,
+    t.rank,
     p.key AS project_key,
     p.name AS project_name,
     t.user_id,
@@ -90,13 +91,21 @@ const createTask = async (req, res) => {
 
     const { key, ticket_number } = counter.rows[0];
 
+    // Rank global por proyecto (ver migración 013): una tarea nueva entra al
+    // final de la secuencia, o sea al fondo del Backlog.
+    const rankResult = await client.query(
+      `SELECT COALESCE(MAX(rank), 0) + 1000 AS next_rank FROM tasks WHERE project_id = $1;`,
+      [project_id]
+    );
+    const nextRank = rankResult.rows[0].next_rank;
+
     const newTask = await client.query(
       `
-      INSERT INTO tasks (id, project_id, ticket_number, user_id, title, description, type)
-      VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6)
+      INSERT INTO tasks (id, project_id, ticket_number, user_id, title, description, type, rank)
+      VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7)
       RETURNING *;
       `,
-      [project_id, ticket_number, user_id, title.trim(), description || null, typeNormalized]
+      [project_id, ticket_number, user_id, title.trim(), description || null, typeNormalized, nextRank]
     );
 
     await client.query('COMMIT');
@@ -168,7 +177,7 @@ const getProjectTasks = async (req, res) => {
       ${TASK_SELECT}
       WHERE t.project_id = $1
         ${filters.map((f) => `AND ${f}`).join(' ')}
-      ORDER BY t.created_at DESC;
+      ORDER BY t.rank;
       `,
       values
     );
