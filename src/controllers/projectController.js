@@ -46,7 +46,7 @@ const generateProjectKey = async (client, name) => {
 const createProject = async (req, res) => {
   const user_id = req.user.id;
   const company_id = req.company.id;      // lo dejó el middleware de acceso a company
-  const { name, description, key } = req.body;
+  const { name, description, key } = req.body || {};
 
   if (!name || typeof name !== 'string' || !name.trim()) {
     return res.status(400).json({ message: 'Name is required' });
@@ -247,7 +247,7 @@ const getProjectById = async (req, res) => {
 // ----------------------------
 const updateProject = async (req, res) => {
   const { id } = req.project;
-  const { name, description } = req.body;
+  const { name, description } = req.body || {};
 
   // `key` no se puede editar a propósito: es el prefijo de todos los ticket id
   // ya repartidos (KAN-42), cambiarla renombraría tickets ya comunicados.
@@ -340,7 +340,7 @@ const deleteProject = async (req, res) => {
 // ----------------------------
 const addProjectMember = async (req, res) => {
   const { id } = req.project;
-  const { email, userId, role } = req.body;
+  const { email, userId, role } = req.body || {};
 
   if (!email && !userId) {
     return res.status(400).json({ message: 'email or userId is required' });
@@ -409,7 +409,7 @@ const isLastOwner = async (projectId, userId) => {
 const updateProjectMemberRole = async (req, res) => {
   const { id } = req.project;
   const { userId } = req.params;
-  const { role } = req.body;
+  const { role } = req.body || {};
 
   if (!role || !PROJECT_ROLES.includes(String(role).toUpperCase())) {
     return res.status(400).json({ message: 'Invalid role value' });
