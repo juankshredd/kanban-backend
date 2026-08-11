@@ -54,7 +54,7 @@ const normalizeStatus = (status) => STATUS_MAP[String(status).toLowerCase()] || 
 const createTask = async (req, res) => {
   const user_id = req.user.id;
   const project_id = req.project.id;      // lo dejó el middleware de acceso
-  const { title, description, type } = req.body;
+  const { title, description, type } = req.body || {};
 
   if (!title || typeof title !== 'string' || !title.trim()) {
     return res.status(400).json({ message: 'Title is required' });
@@ -235,11 +235,12 @@ const getMyTasks = async (req, res) => {
 const updateTask = async (req, res) => {
   const project_id = req.project.id;
   const { id } = req.params;
-  const { status, type } = req.body;
+  const body = req.body || {};
+  const { status, type } = body;
   // 'sprint_id' in body distingue "no lo mandaron" de "lo mandaron en null"
   // (mover a Backlog), que un simple !== undefined no puede.
-  const hasSprintId = Object.prototype.hasOwnProperty.call(req.body, 'sprint_id');
-  const { sprint_id } = req.body;
+  const hasSprintId = Object.prototype.hasOwnProperty.call(body, 'sprint_id');
+  const { sprint_id } = body;
 
   if (status === undefined && type === undefined && !hasSprintId) {
     return res.status(400).json({ message: 'Nothing to update: send status, type and/or sprint_id' });
@@ -336,12 +337,14 @@ const updateTask = async (req, res) => {
 // Actualizar solo el tipo
 // ----------------------------
 const updateTaskType = async (req, res) => {
-  if (req.body.type === undefined) {
+  const type = (req.body || {}).type;
+
+  if (type === undefined) {
     return res.status(400).json({ message: 'Type is required' });
   }
 
   // Misma lógica que updateTask, restringida al tipo.
-  req.body = { type: req.body.type };
+  req.body = { type };
 
   return updateTask(req, res);
 };
