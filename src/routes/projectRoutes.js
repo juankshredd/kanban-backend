@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const authMiddleware = require('../middlewares/authMiddleware');
 const { requireProjectMember, requireProjectOwner } = require('../middlewares/projectAccess');
+const { requireCompanyMemberFromBody } = require('../middlewares/companyAccess');
 const projectTaskRoutes = require('./projectTaskRoutes');
 const projectSprintRoutes = require('./projectSprintRoutes');
 const {
@@ -19,7 +20,7 @@ const {
 // monten más adelante bajo /:projectId) en lugar de repetirlo ruta por ruta.
 router.use(authMiddleware);
 
-router.post('/', createProject);
+router.post('/', requireCompanyMemberFromBody, createProject);
 router.get('/', getProjects);
 
 router.get('/:projectId', requireProjectMember, getProjectById);

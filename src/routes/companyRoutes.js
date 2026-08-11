@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const authMiddleware = require('../middlewares/authMiddleware');
 const { requireCompanyMember, requireCompanyOwner } = require('../middlewares/companyAccess');
+const companyProjectRoutes = require('./companyProjectRoutes');
 const {
   createCompany,
   getCompanies,
@@ -27,5 +28,9 @@ router.delete('/:companyId', requireCompanyOwner, deleteCompany);
 router.post('/:companyId/members', requireCompanyOwner, addCompanyMember);
 router.patch('/:companyId/members/:userId', requireCompanyOwner, updateCompanyMemberRole);
 router.delete('/:companyId/members/:userId', requireCompanyOwner, removeCompanyMember);
+
+// Creación/listado canónico de proyectos dentro de una company. El chequeo de
+// membresía se hace una sola vez acá; el router hijo lo da por hecho.
+router.use('/:companyId/projects', requireCompanyMember, companyProjectRoutes);
 
 module.exports = router;
