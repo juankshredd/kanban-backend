@@ -5,6 +5,8 @@ const {
   createSprint,
   getSprints,
   getActiveSprint,
+  getSprintById,
+  updateSprint,
   startSprint,
   completeSprint,
   deleteSprint
@@ -17,7 +19,11 @@ const projectRetroRoutes = require('./projectRetroRoutes');
 // como borrar el proyecto o manejar members (eso sí exige OWNER).
 router.post('/', createSprint);
 router.get('/', getSprints);
+// /active tiene que ir antes de /:sprintId: si no, "active" matchearía como
+// si fuera un id de sprint.
 router.get('/active', getActiveSprint);
+router.get('/:sprintId', getSprintById);
+router.patch('/:sprintId', updateSprint);
 router.patch('/:sprintId/start', startSprint);
 router.patch('/:sprintId/complete', completeSprint);
 router.delete('/:sprintId', deleteSprint);

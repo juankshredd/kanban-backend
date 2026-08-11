@@ -20,7 +20,7 @@ const SPRINT_SELECT = `
 // ----------------------------
 const createSprint = async (req, res) => {
   const project_id = req.project.id;
-  const { name, goal, start_date, end_date } = req.body;
+  const { name, goal, start_date, end_date } = req.body || {};
 
   if (!name || typeof name !== 'string' || !name.trim()) {
     return res.status(400).json({ message: 'Name is required' });
@@ -89,14 +89,127 @@ const getActiveSprint = async (req, res) => {
   }
 };
 
+// ----------------------------
+// Detalle de un sprint puntual
+// ----------------------------
+const getSprintById = async (req, res) => {
+  const { sprintId } = req.params;
+
+  try {
+    const sprint = await pool.query(
+      `${SPRINT_SELECT} WHERE s.id = $1 AND s.project_id = $2;`,
+      [sprintId, req.project.id]
+    );
+
+    if (sprint.rows.length === 0) {
+      return res.status(404).json({ message: 'Sprint not found' });
+    }
+
+    res.status(200).json(sprint.rows[0]);
+
+  } catch (error) {
+    if (error.code === '22P02') {
+      return res.status(404).json({ message: 'Sprint not found' });
+    }
+
+    console.error("GET SPRINT ERROR:", error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
 // Trae el sprint y confirma que sea del proyecto de la ruta, usado por
-// start/complete/delete antes de tocarlo.
+// update/start/complete/delete antes de tocarlo.
 const findOwnSprint = async (projectId, sprintId) => {
   const result = await pool.query(
     `SELECT * FROM sprints WHERE id = $1 AND project_id = $2;`,
     [sprintId, projectId]
   );
   return result.rows[0] || null;
+};
+
+// ----------------------------
+// Actualizar sprint (name, goal, start_date, end_date)
+// ----------------------------
+// El status no se toca acá a propósito: pasa por start/complete, que además
+// de cambiarlo mueven tareas y respetan el índice one_active_sprint_per_project.
+const updateSprint = async (req, res) => {
+  const project_id = req.project.id;
+  const { sprintId } = req.params;
+  const { name, goal, start_date, end_date } = req.body || {};
+
+  if (name === undefined && goal === undefined && start_date === undefined && end_date === undefined) {
+    return res.status(400).json({
+      message: 'Nothing to update: send name, goal, start_date and/or end_date'
+    });
+  }
+
+  if (name !== undefined) {
+    if (typeof name !== 'string' || !name.trim()) {
+      return res.status(400).json({ message: 'Name cannot be empty' });
+    }
+
+    if (name.trim().length > 100) {
+      return res.status(400).json({ message: 'Name must be 100 characters or less' });
+    }
+  }
+
+  try {
+    const sprint = await findOwnSprint(project_id, sprintId);
+
+    if (!sprint) {
+      return res.status(404).json({ message: 'Sprint not found' });
+    }
+
+    // Se arma dinámico para poder distinguir "no lo mandaron" de "lo mandaron
+    // en null" (limpiar goal/fechas), cosa que un COALESCE no permite.
+    const updates = [];
+    const values = [];
+
+    if (name !== undefined) {
+      values.push(name.trim());
+      updates.push(`name = $${values.length}`);
+    }
+
+    if (goal !== undefined) {
+      values.push(goal);
+      updates.push(`goal = $${values.length}`);
+    }
+
+    if (start_date !== undefined) {
+      values.push(start_date);
+      updates.push(`start_date = $${values.length}`);
+    }
+
+    if (end_date !== undefined) {
+      values.push(end_date);
+      updates.push(`end_date = $${values.length}`);
+    }
+
+    updates.push('updated_at = CURRENT_TIMESTAMP');
+    values.push(sprintId);
+
+    await pool.query(
+      `
+      UPDATE sprints
+      SET ${updates.join(', ')}
+      WHERE id = $${values.length};
+      `,
+      values
+    );
+
+    const updated = await pool.query(`${SPRINT_SELECT} WHERE s.id = $1;`, [sprintId]);
+
+    res.status(200).json(updated.rows[0]);
+
+  } catch (error) {
+    // fecha con formato invalido
+    if (error.code === '22007' || error.code === '22008') {
+      return res.status(400).json({ message: 'Invalid start_date or end_date' });
+    }
+
+    console.error("UPDATE SPRINT ERROR:", error);
+    res.status(500).json({ message: 'Server error' });
+  }
 };
 
 // ----------------------------
@@ -241,6 +354,8 @@ module.exports = {
   createSprint,
   getSprints,
   getActiveSprint,
+  getSprintById,
+  updateSprint,
   startSprint,
   completeSprint,
   deleteSprint

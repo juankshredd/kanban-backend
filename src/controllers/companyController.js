@@ -10,7 +10,7 @@ const COMPANY_ROLES = ['OWNER', 'MEMBER'];
 // ----------------------------
 const createCompany = async (req, res) => {
   const user_id = req.user.id;
-  const { name, description } = req.body;
+  const { name, description } = req.body || {};
 
   if (!name || typeof name !== 'string' || !name.trim()) {
     return res.status(400).json({ message: 'Name is required' });
@@ -141,7 +141,7 @@ const getCompanyById = async (req, res) => {
 // ----------------------------
 const updateCompany = async (req, res) => {
   const { id } = req.company;
-  const { name, description } = req.body;
+  const { name, description } = req.body || {};
 
   if (name === undefined && description === undefined) {
     return res.status(400).json({ message: 'Nothing to update: send name and/or description' });
@@ -233,7 +233,7 @@ const deleteCompany = async (req, res) => {
 // ----------------------------
 const addCompanyMember = async (req, res) => {
   const { id } = req.company;
-  const { email, userId, role } = req.body;
+  const { email, userId, role } = req.body || {};
 
   if (!email && !userId) {
     return res.status(400).json({ message: 'email or userId is required' });
@@ -302,7 +302,7 @@ const isLastOwner = async (companyId, userId) => {
 const updateCompanyMemberRole = async (req, res) => {
   const { id } = req.company;
   const { userId } = req.params;
-  const { role } = req.body;
+  const { role } = req.body || {};
 
   if (!role || !COMPANY_ROLES.includes(String(role).toUpperCase())) {
     return res.status(400).json({ message: 'Invalid role value' });

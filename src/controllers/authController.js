@@ -3,7 +3,7 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 
 const register = async (req, res) => {
-  const { username, email, password } = req.body;
+  const { username, email, password } = req.body || {};
 
   try {
     console.log("REGISTER BODY:", req.body);
@@ -41,7 +41,7 @@ const register = async (req, res) => {
 };
 
 const login = async (req, res) => {
-  const { email, password } = req.body;
+  const { email, password } = req.body || {};
 
   try {
 
