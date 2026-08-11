@@ -27,7 +27,7 @@ BEGIN
     -- Todo usuario que ya sea miembro de algún proyecto entra como MEMBER,
     -- para no perder acceso a lo que ya tenía cuando se filtre por company.
     INSERT INTO company_members (company_id, user_id, role)
-    SELECT DISTINCT new_company_id, pm.user_id, 'MEMBER'
+    SELECT DISTINCT new_company_id, pm.user_id, 'MEMBER'::company_role
     FROM project_members pm
     WHERE pm.user_id <> owner_id;
 
