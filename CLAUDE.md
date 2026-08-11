@@ -25,10 +25,11 @@ Config is loaded via `dotenv` from a `.env` file (gitignored) at the project roo
 
 Standard layered Express structure under `src/`:
 
-- `server.js` — app entry point; wires up CORS, JSON body parsing, and mounts route modules at `/api/auth`, `/api/tasks`, `/api/users`, `/api/projects`. Exports the `app` instance (used directly by Supertest in tests, no separate `app.js`).
+- `server.js` — app entry point; wires up CORS, JSON body parsing, and mounts route modules at `/api/auth`, `/api/tasks`, `/api/users`, `/api/projects`, `/api/companies`. Exports the `app` instance (used directly by Supertest in tests, no separate `app.js`).
 - `db.js` — single shared `pg` `Pool` instance, imported by controllers directly (no query-builder/ORM layer).
-- `routes/*.js` — thin route definitions that wire an Express `Router` to middleware + controller functions. `projectRoutes.js` applies `authMiddleware` once via `router.use(...)` rather than per route, so nested routers mounted under `/:projectId` inherit it. `projectTaskRoutes.js` and `projectSprintRoutes.js` are mounted there behind `requireProjectMember` with `Router({ mergeParams: true })` and therefore declare no access middleware of their own. `projectRetroRoutes.js` goes one level deeper still: it mounts *inside* `projectSprintRoutes.js` under `/:sprintId/retrospective`, so it sees both `:projectId` and `:sprintId` via the same `mergeParams` chain.
-- `middlewares/authMiddleware.js` — verifies the `Authorization: Bearer <token>` JWT (signed with `JWT_SECRET`), attaches the decoded payload (`{ id }`) to `req.user`. All task, user and project routes require this.
+- `routes/*.js` — thin route definitions that wire an Express `Router` to middleware + controller functions. `companyRoutes.js` and `projectRoutes.js` each apply `authMiddleware` once via `router.use(...)` rather than per route, so nested routers mounted under `/:companyId` / `/:projectId` inherit it. `companyProjectRoutes.js`, `projectTaskRoutes.js` and `projectSprintRoutes.js` are mounted behind `requireCompanyMember` / `requireProjectMember` with `Router({ mergeParams: true })` and therefore declare no access middleware of their own. `projectRetroRoutes.js` goes one level deeper still: it mounts *inside* `projectSprintRoutes.js` under `/:sprintId/retrospective`, so it sees both `:projectId` and `:sprintId` via the same `mergeParams` chain.
+- `middlewares/authMiddleware.js` — verifies the `Authorization: Bearer <token>` JWT (signed with `JWT_SECRET`), attaches the decoded payload (`{ id }`) to `req.user`. All task, user, project and company routes require this.
+- `middlewares/companyAccess.js` — company authorization, structurally identical to `projectAccess.js` one level up: attaches `req.company` + `req.companyRole`. `requireCompanyMember`/`requireCompanyOwner` take the id from `req.params.companyId`; `requireCompanyMemberFromBody` takes it from `req.body.company_id` (mounted on the flat `POST /api/projects`, same role `requireProjectMemberFromBody` plays for `POST /api/tasks`). Same 404-for-non-members / 403-for-non-owner convention as projects. **Company membership does not imply project access** — it only gates company administration and *who may create a project inside that company*; `project_members` remains the sole authority over a project's own tasks/sprints/retro.
 - `middlewares/projectAccess.js` — all project authorization. Each variant differs only in where the project id comes from, and all attach `req.project` + `req.projectRole`. **This is the authorization pattern for anything scoped to a project** — mount one of these on the route instead of re-checking membership inside each controller. Non-members get `404` (not `403`) so project existence isn't leaked; a member who lacks OWNER gets `403`.
   - `requireProjectMember` / `requireProjectOwner` — id from `req.params.projectId`.
   - `requireProjectMemberFromBody` — id from `req.body.project_id`, for cross-project endpoints like `POST /api/tasks`.
@@ -46,7 +47,9 @@ Schema changes live in `migrations/*.sql`, applied in filename order by `scripts
 
 - `users` table: `id`, `username`, `email`, `password_hash` (bcrypt-hashed), `is_active` (boolean, used for soft deactivate/reactivate).
 - `tasks` table: `id` (uuid, `gen_random_uuid()`), `user_id` (FK to users), `title`, `description`, `status` (Postgres ENUM: `TODO`, `IN_PROGRESS`, `DONE`), `type` (Postgres ENUM: `EPIC`, `STORY`, `TASK`, `BUG`, defaults to `STORY`), `project_id` (FK to projects), `ticket_number` (int), `created_at`, `updated_at`.
-- `projects` table: `id` (uuid), `key` (unique, `^[A-Z][A-Z0-9]{1,9}$` — the visible ticket prefix), `name`, `description`, `created_by` (FK to users), `next_ticket_number` (atomic counter), timestamps.
+- `companies` table: `id` (uuid), `name`, `description`, `created_by` (FK to users), timestamps. The top-level container above projects — no `key`/ticket-prefix concept, since ticket ids are still derived per-project, not per-company.
+- `company_members` table: `(company_id, user_id)` unique, `role` (Postgres ENUM: `OWNER`, `MEMBER`) — same shape as `project_members`, one level up.
+- `projects` table: `id` (uuid), `key` (unique, `^[A-Z][A-Z0-9]{1,9}$` — the visible ticket prefix), `name`, `description`, `created_by` (FK to users), `company_id` (FK to companies, `NOT NULL`, `ON DELETE CASCADE`), `next_ticket_number` (atomic counter), timestamps.
 - `project_members` table: `(project_id, user_id)` unique, `role` (Postgres ENUM: `OWNER`, `MEMBER`). Projects are multi-user by design; membership — not `tasks.user_id` — is the intended authorization boundary going forward.
 - `sprints` table: `id`, `project_id` (FK), `name`, `goal`, `status` (Postgres ENUM: `PLANNED`, `ACTIVE`, `COMPLETED`), `start_date`, `end_date`, timestamps. A partial unique index (`one_active_sprint_per_project`) enforces at most one `ACTIVE` sprint per project — `startSprint` relies on this to turn a race into a `409` rather than checking-then-writing. `tasks.sprint_id` (nullable FK, `ON DELETE SET NULL`) is the Backlog/Sprint split: `NULL` means Backlog.
 - `retrospective_notes` table: `id`, `sprint_id` (FK, `ON DELETE CASCADE` — unlike tasks, a note has no identity outside its sprint), `author_id` (FK to users), `category` (Postgres ENUM: `WENT_WELL`, `TO_IMPROVE`, `ACTION_ITEM`), `content`, timestamps.
@@ -55,9 +58,26 @@ Schema changes live in `migrations/*.sql`, applied in filename order by `scripts
 
 Existing rows were backfilled into one auto-created project per user by `004_backfill_default_projects.sql`; `006` closed the expand/contract by making both columns `NOT NULL`.
 
+Likewise, `projects.company_id` went through the same expand/contract: `010` added it nullable, `011_backfill_devtest_company.sql` created a single `devTest` company and pointed every pre-existing project at it, and `012` closed it with `NOT NULL`. `011` is guarded on a specific dev-DB user id existing, so it's a no-op against CI's fresh database — see "Company rules" below.
+
 ### Auth flow
 
 Registration hashes passwords with bcrypt and rejects duplicate emails. Login checks `is_active = true`, verifies the bcrypt hash, and issues a JWT (`{ id: user.id }`, 1h expiry) signed with `JWT_SECRET`. There is commented-out (unimplemented) logic in `authController.js` for rate-limiting failed login attempts — not currently enforced.
+
+### Company rules
+
+Companies are the container above projects. `companyController.js` / `companyRoutes.js`, mounted at `/api/companies`. `POST /api/companies` creates the company and its creator's `OWNER` membership in a single transaction, same reasoning as projects — a company without an owner would be unreachable. There's no `key`/ticket-prefix concept at this level.
+
+Deleting a company cascades to its projects (`ON DELETE CASCADE`, which from there cascades further into tasks/sprints/members like a normal project delete), so it returns `409` when the company still has projects unless `?force=true` is passed. The last `OWNER` of a company can be neither demoted nor removed — same `isLastOwner` guard as project membership.
+
+There are two route families for creating a project, both served by `projectController.createProject`:
+
+- `/api/companies/:companyId/projects` — canonical. Behind `requireCompanyMember`.
+- `POST /api/projects` — cross-company, requires `company_id` in the body via `requireCompanyMemberFromBody`.
+
+Either way the handler reads `req.company.id` (set by whichever company middleware ran), exactly how `createTask` reads `req.project.id` today. `GET /api/companies/:companyId/projects` (`getCompanyProjects`) is *not* "every project in the company" — it's still filtered by `project_members.user_id = req.user.id`, because being a company member only grants the right to create projects and administer the company, not automatic access to projects you weren't added to. `GET /api/projects` also accepts an optional `?company_id=` filter.
+
+The `devTest` company that migration `011` created owns every project that existed before this feature shipped — see "Data model" above.
 
 ### Project rules
 
