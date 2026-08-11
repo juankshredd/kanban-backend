@@ -239,20 +239,25 @@ const getMyTasks = async (req, res) => {
 };
 
 // ----------------------------
-// Actualizar una tarea (status, type y/o sprint_id)
+// Actualizar una tarea (status, type, sprint_id y/o posición en el board/backlog)
 // ----------------------------
 const updateTask = async (req, res) => {
   const project_id = req.project.id;
   const { id } = req.params;
   const body = req.body || {};
   const { status, type } = body;
-  // 'sprint_id' in body distingue "no lo mandaron" de "lo mandaron en null"
-  // (mover a Backlog), que un simple !== undefined no puede.
+  // 'sprint_id' y 'after_task_id' usan hasOwnProperty en vez de !== undefined
+  // para distinguir "no lo mandaron" de "lo mandaron en null" (mover al
+  // Backlog / mover al principio de la lista, respectivamente).
   const hasSprintId = Object.prototype.hasOwnProperty.call(body, 'sprint_id');
   const { sprint_id } = body;
+  const hasAfterTaskId = Object.prototype.hasOwnProperty.call(body, 'after_task_id');
+  const { after_task_id } = body;
 
-  if (status === undefined && type === undefined && !hasSprintId) {
-    return res.status(400).json({ message: 'Nothing to update: send status, type and/or sprint_id' });
+  if (status === undefined && type === undefined && !hasSprintId && !hasAfterTaskId) {
+    return res.status(400).json({
+      message: 'Nothing to update: send status, type, sprint_id and/or after_task_id'
+    });
   }
 
   const updates = [];
@@ -305,6 +310,67 @@ const updateTask = async (req, res) => {
 
       values.push(sprint_id);
       updates.push(`sprint_id = $${values.length}`);
+    }
+  }
+
+  if (hasAfterTaskId) {
+    try {
+      // El destino (Board de un sprint, o Backlog) es el sprint_id que la
+      // tarea va a tener después de este mismo request. Si no vino en el
+      // body, hay que leer el actual para saber en qué lista reordenar.
+      let destinationSprintId = sprint_id;
+
+      if (!hasSprintId) {
+        const current = await pool.query(
+          `SELECT sprint_id FROM tasks WHERE id = $1 AND project_id = $2;`,
+          [id, project_id]
+        );
+
+        if (current.rows.length === 0) {
+          return res.status(404).json({ message: 'Task not found' });
+        }
+
+        destinationSprintId = current.rows[0].sprint_id;
+      }
+
+      // IS NOT DISTINCT FROM (no '='): sprint_id NULL es una lista válida
+      // (el Backlog), y NULL = NULL da NULL/false con un '=' normal.
+      const list = await pool.query(
+        `
+        SELECT id, rank FROM tasks
+        WHERE project_id = $1 AND sprint_id IS NOT DISTINCT FROM $2
+        ORDER BY rank;
+        `,
+        [project_id, destinationSprintId]
+      );
+
+      const siblings = list.rows.filter((row) => row.id !== id);
+
+      let newRank;
+      if (after_task_id === null) {
+        // Al principio de la lista.
+        const first = siblings[0];
+        newRank = first ? Number(first.rank) - 1000 : 1000;
+      } else {
+        const afterIndex = siblings.findIndex((row) => row.id === after_task_id);
+
+        if (afterIndex === -1) {
+          return res.status(400).json({ message: 'after_task_id does not belong to the destination list' });
+        }
+
+        const afterRank = Number(siblings[afterIndex].rank);
+        const next = siblings[afterIndex + 1];
+        newRank = next ? (afterRank + Number(next.rank)) / 2 : afterRank + 1000;
+      }
+
+      values.push(newRank);
+      updates.push(`rank = $${values.length}`);
+
+    } catch (error) {
+      if (error.code === '22P02') {
+        return res.status(400).json({ message: 'Invalid after_task_id' });
+      }
+      throw error;
     }
   }
 
