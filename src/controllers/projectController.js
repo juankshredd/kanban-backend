@@ -45,7 +45,8 @@ const generateProjectKey = async (client, name) => {
 // ----------------------------
 const createProject = async (req, res) => {
   const user_id = req.user.id;
-  const { name, description, key } = req.body;
+  const company_id = req.company.id;      // lo dejó el middleware de acceso a company
+  const { name, description, key } = req.body || {};
 
   if (!name || typeof name !== 'string' || !name.trim()) {
     return res.status(400).json({ message: 'Name is required' });
@@ -77,11 +78,11 @@ const createProject = async (req, res) => {
 
     const project = await client.query(
       `
-      INSERT INTO projects (key, name, description, created_by)
-      VALUES ($1, $2, $3, $4)
+      INSERT INTO projects (key, name, description, created_by, company_id)
+      VALUES ($1, $2, $3, $4, $5)
       RETURNING *;
       `,
-      [finalKey, name.trim(), description || null, user_id]
+      [finalKey, name.trim(), description || null, user_id, company_id]
     );
 
     await client.query(
@@ -116,6 +117,9 @@ const createProject = async (req, res) => {
 // ----------------------------
 const getProjects = async (req, res) => {
   const user_id = req.user.id;
+  // Filtro opcional para ver "mis proyectos" acotados a una company, igual
+  // que getMyTasks acepta ?project_id=.
+  const { company_id } = req.query;
 
   try {
     const projects = await pool.query(
@@ -126,6 +130,8 @@ const getProjects = async (req, res) => {
         p.name,
         p.description,
         p.created_by,
+        p.company_id,
+        c.name AS company_name,
         p.created_at,
         p.updated_at,
         pm.role,
@@ -133,16 +139,63 @@ const getProjects = async (req, res) => {
         (SELECT count(*) FROM project_members m WHERE m.project_id = p.id)::int AS member_count
       FROM projects p
       JOIN project_members pm ON pm.project_id = p.id
+      JOIN companies c ON c.id = p.company_id
       WHERE pm.user_id = $1
+        AND ($2::uuid IS NULL OR p.company_id = $2)
       ORDER BY p.created_at DESC;
       `,
-      [user_id]
+      [user_id, company_id || null]
     );
 
     res.status(200).json(projects.rows);
 
   } catch (error) {
+    if (error.code === '22P02') {
+      return res.status(400).json({ message: 'Invalid company_id' });
+    }
+
     console.error("GET PROJECTS ERROR:", error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// ----------------------------
+// Listar los proyectos del usuario logueado dentro de una company
+// ----------------------------
+// requireCompanyMember ya validó el acceso a la company; esto además filtra
+// por project_members, porque ser miembro de la company no da acceso
+// automático a todos sus proyectos (ver middlewares/companyAccess.js).
+const getCompanyProjects = async (req, res) => {
+  const user_id = req.user.id;
+  const { id: company_id } = req.company;
+
+  try {
+    const projects = await pool.query(
+      `
+      SELECT
+        p.id,
+        p.key,
+        p.name,
+        p.description,
+        p.created_by,
+        p.company_id,
+        p.created_at,
+        p.updated_at,
+        pm.role,
+        (SELECT count(*) FROM tasks t WHERE t.project_id = p.id)::int AS task_count,
+        (SELECT count(*) FROM project_members m WHERE m.project_id = p.id)::int AS member_count
+      FROM projects p
+      JOIN project_members pm ON pm.project_id = p.id
+      WHERE pm.user_id = $1 AND p.company_id = $2
+      ORDER BY p.created_at DESC;
+      `,
+      [user_id, company_id]
+    );
+
+    res.status(200).json(projects.rows);
+
+  } catch (error) {
+    console.error("GET COMPANY PROJECTS ERROR:", error);
     res.status(500).json({ message: 'Server error' });
   }
 };
@@ -194,7 +247,7 @@ const getProjectById = async (req, res) => {
 // ----------------------------
 const updateProject = async (req, res) => {
   const { id } = req.project;
-  const { name, description } = req.body;
+  const { name, description } = req.body || {};
 
   // `key` no se puede editar a propósito: es el prefijo de todos los ticket id
   // ya repartidos (KAN-42), cambiarla renombraría tickets ya comunicados.
@@ -287,7 +340,7 @@ const deleteProject = async (req, res) => {
 // ----------------------------
 const addProjectMember = async (req, res) => {
   const { id } = req.project;
-  const { email, userId, role } = req.body;
+  const { email, userId, role } = req.body || {};
 
   if (!email && !userId) {
     return res.status(400).json({ message: 'email or userId is required' });
@@ -356,7 +409,7 @@ const isLastOwner = async (projectId, userId) => {
 const updateProjectMemberRole = async (req, res) => {
   const { id } = req.project;
   const { userId } = req.params;
-  const { role } = req.body;
+  const { role } = req.body || {};
 
   if (!role || !PROJECT_ROLES.includes(String(role).toUpperCase())) {
     return res.status(400).json({ message: 'Invalid role value' });
@@ -444,6 +497,7 @@ const removeProjectMember = async (req, res) => {
 module.exports = {
   createProject,
   getProjects,
+  getCompanyProjects,
   getProjectById,
   updateProject,
   deleteProject,

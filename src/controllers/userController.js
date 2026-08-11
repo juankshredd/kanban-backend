@@ -55,6 +55,5 @@ const activateUser = async (req, res) => {
 
 module.exports = {
   deactivateUser,
-  activateUser,
   activateUser
 };

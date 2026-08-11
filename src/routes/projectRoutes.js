@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const authMiddleware = require('../middlewares/authMiddleware');
 const { requireProjectMember, requireProjectOwner } = require('../middlewares/projectAccess');
+const { requireCompanyMemberFromBody } = require('../middlewares/companyAccess');
 const projectTaskRoutes = require('./projectTaskRoutes');
 const projectSprintRoutes = require('./projectSprintRoutes');
 const {
@@ -14,17 +15,23 @@ const {
   updateProjectMemberRole,
   removeProjectMember
 } = require('../controllers/projectController');
+const { getBoard, getBacklogView } = require('../controllers/boardController');
 
 // Se aplica una vez para todo el router (incluidos los routers anidados que se
 // monten más adelante bajo /:projectId) en lugar de repetirlo ruta por ruta.
 router.use(authMiddleware);
 
-router.post('/', createProject);
+router.post('/', requireCompanyMemberFromBody, createProject);
 router.get('/', getProjects);
 
 router.get('/:projectId', requireProjectMember, getProjectById);
 router.patch('/:projectId', requireProjectOwner, updateProject);
 router.delete('/:projectId', requireProjectOwner, deleteProject);
+
+// Vistas agregadas para las pantallas Board y Backlog (sprint activo +
+// tareas / sprints futuros + tareas + Backlog, cada una en un solo request).
+router.get('/:projectId/board', requireProjectMember, getBoard);
+router.get('/:projectId/backlog', requireProjectMember, getBacklogView);
 
 router.post('/:projectId/members', requireProjectOwner, addProjectMember);
 router.patch('/:projectId/members/:userId', requireProjectOwner, updateProjectMemberRole);

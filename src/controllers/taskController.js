@@ -29,6 +29,7 @@ const TASK_SELECT = `
     t.type,
     t.project_id,
     t.sprint_id,
+    t.rank,
     p.key AS project_key,
     p.name AS project_name,
     t.user_id,
@@ -54,7 +55,7 @@ const normalizeStatus = (status) => STATUS_MAP[String(status).toLowerCase()] || 
 const createTask = async (req, res) => {
   const user_id = req.user.id;
   const project_id = req.project.id;      // lo dejó el middleware de acceso
-  const { title, description, type } = req.body;
+  const { title, description, type } = req.body || {};
 
   if (!title || typeof title !== 'string' || !title.trim()) {
     return res.status(400).json({ message: 'Title is required' });
@@ -90,13 +91,21 @@ const createTask = async (req, res) => {
 
     const { key, ticket_number } = counter.rows[0];
 
+    // Rank global por proyecto (ver migración 013): una tarea nueva entra al
+    // final de la secuencia, o sea al fondo del Backlog.
+    const rankResult = await client.query(
+      `SELECT COALESCE(MAX(rank), 0) + 1000 AS next_rank FROM tasks WHERE project_id = $1;`,
+      [project_id]
+    );
+    const nextRank = rankResult.rows[0].next_rank;
+
     const newTask = await client.query(
       `
-      INSERT INTO tasks (id, project_id, ticket_number, user_id, title, description, type)
-      VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6)
+      INSERT INTO tasks (id, project_id, ticket_number, user_id, title, description, type, rank)
+      VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7)
       RETURNING *;
       `,
-      [project_id, ticket_number, user_id, title.trim(), description || null, typeNormalized]
+      [project_id, ticket_number, user_id, title.trim(), description || null, typeNormalized, nextRank]
     );
 
     await client.query('COMMIT');
@@ -168,7 +177,7 @@ const getProjectTasks = async (req, res) => {
       ${TASK_SELECT}
       WHERE t.project_id = $1
         ${filters.map((f) => `AND ${f}`).join(' ')}
-      ORDER BY t.created_at DESC;
+      ORDER BY t.rank;
       `,
       values
     );
@@ -230,19 +239,25 @@ const getMyTasks = async (req, res) => {
 };
 
 // ----------------------------
-// Actualizar una tarea (status, type y/o sprint_id)
+// Actualizar una tarea (status, type, sprint_id y/o posición en el board/backlog)
 // ----------------------------
 const updateTask = async (req, res) => {
   const project_id = req.project.id;
   const { id } = req.params;
-  const { status, type } = req.body;
-  // 'sprint_id' in body distingue "no lo mandaron" de "lo mandaron en null"
-  // (mover a Backlog), que un simple !== undefined no puede.
-  const hasSprintId = Object.prototype.hasOwnProperty.call(req.body, 'sprint_id');
-  const { sprint_id } = req.body;
+  const body = req.body || {};
+  const { status, type } = body;
+  // 'sprint_id' y 'after_task_id' usan hasOwnProperty en vez de !== undefined
+  // para distinguir "no lo mandaron" de "lo mandaron en null" (mover al
+  // Backlog / mover al principio de la lista, respectivamente).
+  const hasSprintId = Object.prototype.hasOwnProperty.call(body, 'sprint_id');
+  const { sprint_id } = body;
+  const hasAfterTaskId = Object.prototype.hasOwnProperty.call(body, 'after_task_id');
+  const { after_task_id } = body;
 
-  if (status === undefined && type === undefined && !hasSprintId) {
-    return res.status(400).json({ message: 'Nothing to update: send status, type and/or sprint_id' });
+  if (status === undefined && type === undefined && !hasSprintId && !hasAfterTaskId) {
+    return res.status(400).json({
+      message: 'Nothing to update: send status, type, sprint_id and/or after_task_id'
+    });
   }
 
   const updates = [];
@@ -298,6 +313,67 @@ const updateTask = async (req, res) => {
     }
   }
 
+  if (hasAfterTaskId) {
+    try {
+      // El destino (Board de un sprint, o Backlog) es el sprint_id que la
+      // tarea va a tener después de este mismo request. Si no vino en el
+      // body, hay que leer el actual para saber en qué lista reordenar.
+      let destinationSprintId = sprint_id;
+
+      if (!hasSprintId) {
+        const current = await pool.query(
+          `SELECT sprint_id FROM tasks WHERE id = $1 AND project_id = $2;`,
+          [id, project_id]
+        );
+
+        if (current.rows.length === 0) {
+          return res.status(404).json({ message: 'Task not found' });
+        }
+
+        destinationSprintId = current.rows[0].sprint_id;
+      }
+
+      // IS NOT DISTINCT FROM (no '='): sprint_id NULL es una lista válida
+      // (el Backlog), y NULL = NULL da NULL/false con un '=' normal.
+      const list = await pool.query(
+        `
+        SELECT id, rank FROM tasks
+        WHERE project_id = $1 AND sprint_id IS NOT DISTINCT FROM $2
+        ORDER BY rank;
+        `,
+        [project_id, destinationSprintId]
+      );
+
+      const siblings = list.rows.filter((row) => row.id !== id);
+
+      let newRank;
+      if (after_task_id === null) {
+        // Al principio de la lista.
+        const first = siblings[0];
+        newRank = first ? Number(first.rank) - 1000 : 1000;
+      } else {
+        const afterIndex = siblings.findIndex((row) => row.id === after_task_id);
+
+        if (afterIndex === -1) {
+          return res.status(400).json({ message: 'after_task_id does not belong to the destination list' });
+        }
+
+        const afterRank = Number(siblings[afterIndex].rank);
+        const next = siblings[afterIndex + 1];
+        newRank = next ? (afterRank + Number(next.rank)) / 2 : afterRank + 1000;
+      }
+
+      values.push(newRank);
+      updates.push(`rank = $${values.length}`);
+
+    } catch (error) {
+      if (error.code === '22P02') {
+        return res.status(400).json({ message: 'Invalid after_task_id' });
+      }
+      throw error;
+    }
+  }
+
   updates.push('updated_at = CURRENT_TIMESTAMP');
   values.push(id, project_id);
 
@@ -336,12 +412,14 @@ const updateTask = async (req, res) => {
 // Actualizar solo el tipo
 // ----------------------------
 const updateTaskType = async (req, res) => {
-  if (req.body.type === undefined) {
+  const type = (req.body || {}).type;
+
+  if (type === undefined) {
     return res.status(400).json({ message: 'Type is required' });
   }
 
   // Misma lógica que updateTask, restringida al tipo.
-  req.body = { type: req.body.type };
+  req.body = { type };
 
   return updateTask(req, res);
 };
@@ -393,5 +471,8 @@ module.exports = {
   getMyTasks,
   updateTask,
   updateTaskType,
-  deleteTask
+  deleteTask,
+  // Reusado por boardController.js: misma proyección de tarea para el
+  // Board y el Backlog, en vez de duplicar el SELECT.
+  TASK_SELECT
 };
