@@ -41,7 +41,7 @@ const findSprintInProject = async (projectId, sprintId) => {
 // ----------------------------
 const createNote = async (req, res) => {
   const { sprintId } = req.params;
-  const { category, content } = req.body;
+  const { category, content } = req.body || {};
 
   if (!content || typeof content !== 'string' || !content.trim()) {
     return res.status(400).json({ message: 'Content is required' });
@@ -144,7 +144,7 @@ const findOwnNote = async (projectId, sprintId, noteId) => {
 // ----------------------------
 const updateNote = async (req, res) => {
   const { sprintId, noteId } = req.params;
-  const { category, content } = req.body;
+  const { category, content } = req.body || {};
 
   if (category === undefined && content === undefined) {
     return res.status(400).json({ message: 'Nothing to update: send category and/or content' });
