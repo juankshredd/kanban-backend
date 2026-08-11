@@ -471,5 +471,8 @@ module.exports = {
   getMyTasks,
   updateTask,
   updateTaskType,
-  deleteTask
+  deleteTask,
+  // Reusado por boardController.js: misma proyección de tarea para el
+  // Board y el Backlog, en vez de duplicar el SELECT.
+  TASK_SELECT
 };
