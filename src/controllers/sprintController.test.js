@@ -8,6 +8,8 @@ const {
   createSprint,
   getSprints,
   getActiveSprint,
+  getSprintById,
+  updateSprint,
   startSprint,
   completeSprint,
   deleteSprint
@@ -121,6 +123,78 @@ describe('sprintController.getActiveSprint', () => {
 
     expect(res.status).toHaveBeenCalledWith(404);
     expect(res.json).toHaveBeenCalledWith({ message: 'No active sprint' });
+  });
+});
+
+describe('sprintController.getSprintById', () => {
+  afterEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('200 + the sprint when it belongs to the project', async () => {
+    const sprintRow = { id: 'sprint-uuid', name: 'Sprint 1', status: 'PLANNED', task_count: 0 };
+    pool.query.mockResolvedValue({ rows: [sprintRow] });
+
+    const req = { project: { id: 'project-uuid' }, params: { sprintId: 'sprint-uuid' } };
+    const res = mockRes();
+
+    await getSprintById(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(res.json).toHaveBeenCalledWith(sprintRow);
+  });
+
+  it('404 when the sprint does not exist in the project', async () => {
+    pool.query.mockResolvedValue({ rows: [] });
+
+    const req = { project: { id: 'project-uuid' }, params: { sprintId: 'missing-uuid' } };
+    const res = mockRes();
+
+    await getSprintById(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(404);
+    expect(res.json).toHaveBeenCalledWith({ message: 'Sprint not found' });
+  });
+});
+
+describe('sprintController.updateSprint', () => {
+  afterEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('200 + updated sprint when a valid name is sent', async () => {
+    const existingSprint = { id: 'sprint-uuid', project_id: 'project-uuid', status: 'PLANNED' };
+    const updatedRow = { id: 'sprint-uuid', name: 'New Name', status: 'PLANNED', task_count: 0 };
+
+    pool.query
+      .mockResolvedValueOnce({ rows: [existingSprint] }) // findOwnSprint
+      .mockResolvedValueOnce({})                         // UPDATE
+      .mockResolvedValueOnce({ rows: [updatedRow] });     // re-read via SPRINT_SELECT
+
+    const req = {
+      project: { id: 'project-uuid' },
+      params: { sprintId: 'sprint-uuid' },
+      body: { name: 'New Name' }
+    };
+    const res = mockRes();
+
+    await updateSprint(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(res.json).toHaveBeenCalledWith(updatedRow);
+  });
+
+  it('400 when no field to update is sent', async () => {
+    const req = { project: { id: 'project-uuid' }, params: { sprintId: 'sprint-uuid' }, body: {} };
+    const res = mockRes();
+
+    await updateSprint(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith({
+      message: 'Nothing to update: send name, goal, start_date and/or end_date'
+    });
+    expect(pool.query).not.toHaveBeenCalled();
   });
 });
 
