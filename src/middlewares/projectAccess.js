@@ -37,11 +37,14 @@ const loadProjectAccess = async (req, res, projectId) => {
       p.name,
       p.description,
       p.created_by,
+      p.company_id,
+      c.name AS company_name,
       p.created_at,
       p.updated_at,
       pm.role
     FROM projects p
     JOIN project_members pm ON pm.project_id = p.id
+    JOIN companies c ON c.id = p.company_id
     WHERE p.id = $1 AND pm.user_id = $2;
     `,
     [projectId, user_id]
