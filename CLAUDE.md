@@ -50,7 +50,7 @@ Schema changes live in `migrations/*.sql`, applied in filename order by `scripts
 ### Data model
 
 - `users` table: `id`, `username`, `email`, `password_hash` (bcrypt-hashed), `is_active` (boolean, used for soft deactivate/reactivate).
-- `tasks` table: `id` (uuid, `gen_random_uuid()`), `user_id` (FK to users), `title`, `description`, `status` (Postgres ENUM: `TODO`, `IN_PROGRESS`, `DONE`), `type` (Postgres ENUM: `EPIC`, `STORY`, `TASK`, `BUG`, defaults to `STORY`), `project_id` (FK to projects), `ticket_number` (int), `created_at`, `updated_at`.
+- `tasks` table: `id` (uuid, `gen_random_uuid()`), `user_id` (FK to users), `title`, `description`, `status` (Postgres ENUM: `TODO`, `IN_PROGRESS`, `DONE`), `type` (Postgres ENUM: `EPIC`, `STORY`, `TASK`, `BUG`, defaults to `STORY`), `project_id` (FK to projects), `ticket_number` (int), `rank` (`numeric`, `NOT NULL` — manual Board/Backlog ordering, one global sequence per project; see "Board & Backlog rules"), `created_at`, `updated_at`.
 - `companies` table: `id` (uuid), `name`, `description`, `created_by` (FK to users), timestamps. The top-level container above projects — no `key`/ticket-prefix concept, since ticket ids are still derived per-project, not per-company.
 - `company_members` table: `(company_id, user_id)` unique, `role` (Postgres ENUM: `OWNER`, `MEMBER`) — same shape as `project_members`, one level up.
 - `projects` table: `id` (uuid), `key` (unique, `^[A-Z][A-Z0-9]{1,9}$` — the visible ticket prefix), `name`, `description`, `created_by` (FK to users), `company_id` (FK to companies, `NOT NULL`, `ON DELETE CASCADE`), `next_ticket_number` (atomic counter), timestamps.
@@ -96,9 +96,9 @@ Tasks are authorized by **project membership**, not by `tasks.user_id` (which is
 - `/api/projects/:projectId/tasks` — canonical, the board of one project. Behind `requireProjectMember`.
 - `/api/tasks` — cross-project. `GET` is the "my work" view across every project the user belongs to (optional `?project_id=`), `POST` requires `project_id` in the body, and `PATCH`/`DELETE /:id` resolve the project from the task itself.
 
-Handlers read the project from `req.project.id` and scope every query with `WHERE id = $1 AND project_id = $2`, so a task from another project can't be reached through a project you do belong to. `PATCH` accepts `status`, `type` and/or `sprint_id` (at least one). Deletion is still restricted to tasks with `status = 'TODO'`.
+Handlers read the project from `req.project.id` and scope every query with `WHERE id = $1 AND project_id = $2`, so a task from another project can't be reached through a project you do belong to. `PATCH` accepts `status`, `type`, `sprint_id` and/or `after_task_id` (at least one). Deletion is still restricted to tasks with `status = 'TODO'`.
 
-`sprint_id` uses `hasOwnProperty` rather than `!== undefined` to tell "not sent" from "sent as `null`" — the latter is how a task moves back to the Backlog. A non-null `sprint_id` is validated against `sprints.project_id` so a task can't end up pointing at another project's sprint. List endpoints (`getProjectTasks`/`getMyTasks`) accept `?sprint_id=<uuid>` or the keyword `?sprint_id=backlog` (there's no way to put a literal `NULL` in a query string) via the shared `buildTaskFilters` — the same filter helper also handles `?status=` and `?type=`, so a new filter is one branch added there rather than a new endpoint.
+`sprint_id` uses `hasOwnProperty` rather than `!== undefined` to tell "not sent" from "sent as `null`" — the latter is how a task moves back to the Backlog. A non-null `sprint_id` is validated against `sprints.project_id` so a task can't end up pointing at another project's sprint. List endpoints (`getProjectTasks`/`getMyTasks`) accept `?sprint_id=<uuid>` or the keyword `?sprint_id=backlog` (there's no way to put a literal `NULL` in a query string) via the shared `buildTaskFilters` — the same filter helper also handles `?status=` and `?type=`, so a new filter is one branch added there rather than a new endpoint. `getProjectTasks` orders by `rank` (see "Board & Backlog rules" below); `getMyTasks` still orders by `created_at DESC` since it spans multiple projects, where one project's `rank` isn't a meaningful cross-project order.
 
 ### Sprint rules
 
@@ -111,6 +111,19 @@ Handlers read the project from `req.project.id` and scope every query with `WHER
 - `PATCH /:sprintId/complete` moves `ACTIVE` → `COMPLETED` and, in the same transaction, sets `sprint_id = NULL` on every non-`DONE` task in that sprint (returned as `moved_to_backlog`) — finished work stays attached to the sprint as history, unfinished work returns to the Backlog instead of being stranded on a closed sprint.
 - `DELETE /:sprintId` only allowed while still `PLANNED` — deleting an `ACTIVE`/`COMPLETED` sprint would silently scatter its tasks to the Backlog via `ON DELETE SET NULL`; `completeSprint` is the explicit, auditable way to do that instead.
 - `GET /active` is the "Current Sprint" lookup a board view polls; `404` when none is active.
+
+### Board & Backlog rules
+
+`tasks.rank` (numeric, migration `013_task_rank.sql`) is **one global ordering sequence per project**, not one per sprint — this mirrors Jira's own model (a single ranked list; the Board and each Backlog section are just that list filtered by `sprint_id`), so relative order is automatically correct in any filtered view without maintaining a separate sequence per sprint/Backlog. `numeric`, not `float`: inserting between two neighbors via `(a + b) / 2` never loses precision even after many reorders, so there's no rebalance job. New tasks (`createTask`) always append to the end of the project's sequence (bottom of the Backlog, since new tasks have no `sprint_id` yet).
+
+Reordering goes through the existing `PATCH /api/tasks/:id` (`updateTask`), via an optional `after_task_id` — same `hasOwnProperty` trick as `sprint_id` (`null` = top of the destination list, absent = don't touch rank). The destination list is `project_id` + whatever `sprint_id` the task ends up with *after this same request* (its current `sprint_id` is looked up if not sent), matched with `IS NOT DISTINCT FROM` rather than `=` so Backlog-to-Backlog reorders (`sprint_id IS NULL`) work. This means one API call carries both "move to a different sprint" and "drop at this exact position" — exactly what a single drag-and-drop event needs to send.
+
+`boardController.js`, mounted directly in `projectRoutes.js` (leaf `GET`s, not a nested resource family — same pattern as `getProjectById`), exposes two read-optimized aggregate views built for a Jira-style UI so the frontend isn't composing several calls per screen:
+
+- `GET /api/projects/:projectId/board` — the active sprint + its tasks (ordered by `rank`) in one call; `404` if there's no active sprint. Deliberately separate from `sprintController.getActiveSprint` (used elsewhere for lighter widgets like a "Current Sprint" pill) so that endpoint doesn't get bloated with a full task list it doesn't need.
+- `GET /api/projects/:projectId/backlog` — every `PLANNED` sprint (ordered by `start_date`, nulls last) with its own tasks embedded, plus the unassigned Backlog tasks. Always exactly 3 queries (sprints, backlog tasks, all-sprints'-tasks via `sprint_id = ANY(...)`) regardless of how many future sprints exist, instead of `1 + N` round trips.
+
+Both reuse `taskController.js`'s `TASK_SELECT` (exported for this reason) rather than redefining the task projection — the first SQL fragment shared across controller files; every other `*_SELECT` (`SPRINT_SELECT`, `NOTE_SELECT`) is still private to its own controller.
 
 ### Retrospective rules
 
