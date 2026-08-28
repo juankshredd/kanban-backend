@@ -82,4 +82,18 @@ describe('userController.activateUser', () => {
     expect(res.status).toHaveBeenCalledWith(403);
     expect(res.json).toHaveBeenCalledWith({ message: 'You can only activate your own account' });
   });
+
+  it('200 activates when the id differs from req.user.id only in case', async () => {
+    pool.query.mockResolvedValue({
+      rows: [{ id: 'ABCD-1234', username: 'juank', is_active: true }]
+    });
+
+    const req = { params: { id: 'ABCD-1234' }, user: { id: 'abcd-1234' } };
+    const res = mockRes();
+
+    await activateUser(req, res);
+
+    expect(pool.query).toHaveBeenCalledWith(expect.any(String), ['ABCD-1234']);
+    expect(res.json).toHaveBeenCalledWith({ message: 'User activated successfully' });
+  });
 });

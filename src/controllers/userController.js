@@ -11,7 +11,7 @@ const deactivateUser = async (req, res) => {
 const activateUser = async (req, res) => {
   const { id } = req.params;
 
-  if (id !== req.user.id) {
+  if (id.toLowerCase() !== req.user.id.toLowerCase()) {
     return res.status(403).json({ message: 'You can only activate your own account' });
   }
 
