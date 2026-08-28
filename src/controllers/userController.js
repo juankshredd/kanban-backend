@@ -3,6 +3,10 @@ const pool = require('../db');
 const deactivateUser = async (req, res) => {
   const { id } = req.params;
 
+  if (id !== req.user.id) {
+    return res.status(403).json({ message: 'You can only deactivate your own account' });
+  }
+
   try {
     const result = await pool.query(
       `
@@ -29,6 +33,10 @@ const deactivateUser = async (req, res) => {
 // reactivar usuario
 const activateUser = async (req, res) => {
   const { id } = req.params;
+
+  if (id !== req.user.id) {
+    return res.status(403).json({ message: 'You can only activate your own account' });
+  }
 
   try {
     const result = await pool.query(

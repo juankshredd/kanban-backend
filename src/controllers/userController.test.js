@@ -23,7 +23,7 @@ describe('userController.deactivateUser', () => {
       rows: [{ id: 'user-uuid', username: 'juank', is_active: false }]
     });
 
-    const req = { params: { id: 'user-uuid' } };
+    const req = { params: { id: 'user-uuid' }, user: { id: 'user-uuid' } };
     const res = mockRes();
 
     await deactivateUser(req, res);
@@ -35,13 +35,24 @@ describe('userController.deactivateUser', () => {
   it('404 when the user does not exist', async () => {
     pool.query.mockResolvedValue({ rows: [] });
 
-    const req = { params: { id: 'missing-uuid' } };
+    const req = { params: { id: 'missing-uuid' }, user: { id: 'missing-uuid' } };
     const res = mockRes();
 
     await deactivateUser(req, res);
 
     expect(res.status).toHaveBeenCalledWith(404);
     expect(res.json).toHaveBeenCalledWith({ message: 'User not found' });
+  });
+
+  it('403 when acting on another user\'s account', async () => {
+    const req = { params: { id: 'other-uuid' }, user: { id: 'self-uuid' } };
+    const res = mockRes();
+
+    await deactivateUser(req, res);
+
+    expect(pool.query).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(403);
+    expect(res.json).toHaveBeenCalledWith({ message: 'You can only deactivate your own account' });
   });
 });
 
@@ -55,7 +66,7 @@ describe('userController.activateUser', () => {
       rows: [{ id: 'user-uuid', username: 'juank', is_active: true }]
     });
 
-    const req = { params: { id: 'user-uuid' } };
+    const req = { params: { id: 'user-uuid' }, user: { id: 'user-uuid' } };
     const res = mockRes();
 
     await activateUser(req, res);
@@ -67,12 +78,23 @@ describe('userController.activateUser', () => {
   it('404 when the user does not exist', async () => {
     pool.query.mockResolvedValue({ rows: [] });
 
-    const req = { params: { id: 'missing-uuid' } };
+    const req = { params: { id: 'missing-uuid' }, user: { id: 'missing-uuid' } };
     const res = mockRes();
 
     await activateUser(req, res);
 
     expect(res.status).toHaveBeenCalledWith(404);
     expect(res.json).toHaveBeenCalledWith({ message: 'User not found' });
+  });
+
+  it('403 when acting on another user\'s account', async () => {
+    const req = { params: { id: 'other-uuid' }, user: { id: 'self-uuid' } };
+    const res = mockRes();
+
+    await activateUser(req, res);
+
+    expect(pool.query).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(403);
+    expect(res.json).toHaveBeenCalledWith({ message: 'You can only activate your own account' });
   });
 });
