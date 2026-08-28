@@ -1,33 +1,10 @@
 const pool = require('../db');
 
 const deactivateUser = async (req, res) => {
-  const { id } = req.params;
-
-  if (id !== req.user.id) {
-    return res.status(403).json({ message: 'You can only deactivate your own account' });
-  }
-
-  try {
-    const result = await pool.query(
-      `
-      UPDATE users
-      SET is_active = false
-      WHERE id = $1
-      RETURNING id, username, is_active;
-      `,
-      [id]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({ message: 'User not found' });
-    }
-
-    res.json({ message: 'User deactivated successfully' });
-
-  } catch (error) {
-    console.error("DEACTIVATE USER ERROR:", error);
-    res.status(500).json({ message: 'Server error' });
-  }
+  // Disabled: there is no account-recovery/admin mechanism yet, so allowing
+  // even self-deactivation risks a permanent lockout once the JWT expires
+  // (login requires is_active = true, and only the owner can reactivate).
+  return res.status(403).json({ message: 'Account deactivation is currently disabled' });
 };
 
 // reactivar usuario
