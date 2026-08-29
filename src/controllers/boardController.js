@@ -118,11 +118,15 @@ const getTaskHierarchy = async (req, res) => {
       }
     }
 
-    const epics = tasks.rows
-      .filter((task) => task.type === 'EPIC')
+    // Raíz = sin padre, sea cual sea el tipo: no solo EPICs. parent_id es
+    // opcional para todos los tipos (una STORY puede no tener FEATURE todavía),
+    // así que filtrar por type === 'EPIC' dejaba esas tareas sin padre fuera
+    // de la respuesta aunque existieran y fueran válidas.
+    const roots = tasks.rows
+      .filter((task) => !task.parent_id)
       .map((task) => byId[task.id]);
 
-    res.status(200).json({ epics });
+    res.status(200).json({ roots });
 
   } catch (error) {
     console.error("GET TASK HIERARCHY ERROR:", error);

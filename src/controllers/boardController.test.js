@@ -119,7 +119,7 @@ describe('boardController.getTaskHierarchy', () => {
     expect(pool.query).toHaveBeenCalledTimes(1); // una sola consulta sin importar el tamaño del árbol
     expect(res.status).toHaveBeenCalledWith(200);
     expect(res.json).toHaveBeenCalledWith({
-      epics: [
+      roots: [
         {
           ...epic,
           children: [
@@ -141,7 +141,21 @@ describe('boardController.getTaskHierarchy', () => {
     });
   });
 
-  it('200 + empty epics list when the project has no tasks', async () => {
+  it('200 + a non-EPIC task with no parent still appears as a root (not silently dropped)', async () => {
+    const orphanStory = { id: 'story-2', type: 'STORY', parent_id: null };
+
+    pool.query.mockResolvedValueOnce({ rows: [orphanStory] });
+
+    const req = { project: { id: 'project-uuid' } };
+    const res = mockRes();
+
+    await getTaskHierarchy(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(res.json).toHaveBeenCalledWith({ roots: [{ ...orphanStory, children: [] }] });
+  });
+
+  it('200 + empty roots list when the project has no tasks', async () => {
     pool.query.mockResolvedValueOnce({ rows: [] });
 
     const req = { project: { id: 'project-uuid' } };
@@ -150,7 +164,7 @@ describe('boardController.getTaskHierarchy', () => {
     await getTaskHierarchy(req, res);
 
     expect(res.status).toHaveBeenCalledWith(200);
-    expect(res.json).toHaveBeenCalledWith({ epics: [] });
+    expect(res.json).toHaveBeenCalledWith({ roots: [] });
   });
 
   it('500 when the query fails', async () => {

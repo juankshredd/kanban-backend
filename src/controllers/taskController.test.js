@@ -233,6 +233,33 @@ describe('taskController.createTask', () => {
     expect(pool.query).not.toHaveBeenCalled();
     expect(pool.connect).not.toHaveBeenCalled();
   });
+
+  it('409 when parent_id was deleted between validation and the INSERT (race)', async () => {
+    pool.query.mockResolvedValueOnce({ rows: [{ type: 'FEATURE' }] }); // validateParentId: still valid at this point
+
+    const fkError = new Error('insert or update on table "tasks" violates foreign key constraint');
+    fkError.code = '23503';
+    const client = { query: jest.fn(), release: jest.fn() };
+    client.query
+      .mockResolvedValueOnce(undefined)                                    // BEGIN
+      .mockResolvedValueOnce({ rows: [{ key: 'ACM', ticket_number: 8 }] })  // atomic counter
+      .mockResolvedValueOnce({ rows: [{ next_rank: 6000 }] })              // rank
+      .mockRejectedValueOnce(fkError)                                     // INSERT: parent_id was just deleted
+      .mockResolvedValueOnce(undefined);                                   // ROLLBACK
+    pool.connect.mockResolvedValue(client);
+
+    const req = {
+      user: { id: 'user-uuid' },
+      project: { id: 'project-uuid' },
+      body: { title: 'Login story', type: 'story', parent_id: 'feature-uuid' }
+    };
+    const res = mockRes();
+
+    await createTask(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(res.json).toHaveBeenCalledWith({ message: 'parent_id no longer exists' });
+  });
 });
 
 describe('taskController.getProjectTasks', () => {
@@ -263,6 +290,20 @@ describe('taskController.getProjectTasks', () => {
     expect(res.status).toHaveBeenCalledWith(400);
     expect(res.json).toHaveBeenCalledWith({ message: 'Invalid status value' });
     expect(pool.query).not.toHaveBeenCalled();
+  });
+
+  it('400 when the DB rejects a malformed parent_id filter', async () => {
+    const error = new Error('invalid input syntax for type uuid');
+    error.code = '22P02';
+    pool.query.mockRejectedValue(error);
+
+    const req = { project: { id: 'project-uuid' }, query: { parent_id: 'not-a-uuid' } };
+    const res = mockRes();
+
+    await getProjectTasks(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith({ message: 'Invalid sprint_id or parent_id' });
   });
 });
 
@@ -296,7 +337,7 @@ describe('taskController.getMyTasks', () => {
     await getMyTasks(req, res);
 
     expect(res.status).toHaveBeenCalledWith(400);
-    expect(res.json).toHaveBeenCalledWith({ message: 'Invalid project_id or sprint_id' });
+    expect(res.json).toHaveBeenCalledWith({ message: 'Invalid project_id, sprint_id or parent_id' });
   });
 });
 
@@ -538,6 +579,27 @@ describe('taskController.updateTask', () => {
     expect(res.json).toHaveBeenCalledWith({
       message: expect.stringContaining('existing parent_id is incompatible with the new type')
     });
+  });
+
+  it('409 when parent_id was deleted between validation and the UPDATE (race)', async () => {
+    const fkError = new Error('update on table "tasks" violates foreign key constraint');
+    fkError.code = '23503';
+    pool.query
+      .mockResolvedValueOnce({ rows: [{ type: 'TASK', details: {} }] }) // current-row fetch (details-vs-new-type guard)
+      .mockResolvedValueOnce({ rows: [{ type: 'FEATURE' }] })           // validateParentId: still valid at this point
+      .mockRejectedValueOnce(fkError);                                 // UPDATE: parent_id was just deleted
+
+    const req = {
+      project: { id: 'project-uuid' },
+      params: { id: 'task-uuid' },
+      body: { type: 'story', parent_id: 'feature-uuid' }
+    };
+    const res = mockRes();
+
+    await updateTask(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(res.json).toHaveBeenCalledWith({ message: 'parent_id no longer exists' });
   });
 
   it('400 when details has a key invalid for the effective type', async () => {

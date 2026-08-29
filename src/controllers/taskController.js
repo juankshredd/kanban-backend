@@ -228,6 +228,14 @@ const createTask = async (req, res) => {
 
   } catch (error) {
     await client.query('ROLLBACK');
+
+    // parent_id existía en la validación previa pero fue borrado antes de que
+    // este INSERT corriera (carrera entre requests). Mismo código que
+    // deleteTask usa para "todavía hay algo apuntando a esto".
+    if (error.code === '23503') {
+      return res.status(409).json({ message: 'parent_id no longer exists' });
+    }
+
     console.error("CREATE TASK ERROR:", error);
     res.status(500).json({ message: 'Server error' });
 
@@ -307,9 +315,9 @@ const getProjectTasks = async (req, res) => {
     res.status(200).json(tasks.rows);
 
   } catch (error) {
-    // uuid mal formado en el filtro sprint_id
+    // uuid mal formado en el filtro sprint_id o parent_id
     if (error.code === '22P02') {
-      return res.status(400).json({ message: 'Invalid sprint_id' });
+      return res.status(400).json({ message: 'Invalid sprint_id or parent_id' });
     }
 
     console.error("GET PROJECT TASKS ERROR:", error);
@@ -350,9 +358,9 @@ const getMyTasks = async (req, res) => {
     res.status(200).json(tasks.rows);
 
   } catch (error) {
-    // uuid mal formado en el filtro project_id o sprint_id
+    // uuid mal formado en el filtro project_id, sprint_id o parent_id
     if (error.code === '22P02') {
-      return res.status(400).json({ message: 'Invalid project_id or sprint_id' });
+      return res.status(400).json({ message: 'Invalid project_id, sprint_id or parent_id' });
     }
 
     console.error("GET MY TASKS ERROR:", error);
@@ -631,6 +639,12 @@ const updateTask = async (req, res) => {
   } catch (error) {
     if (error.code === '22P02') {
       return res.status(404).json({ message: 'Task not found' });
+    }
+
+    // Igual que en createTask: parent_id era válido al validarlo pero fue
+    // borrado antes de que este UPDATE corriera.
+    if (error.code === '23503') {
+      return res.status(409).json({ message: 'parent_id no longer exists' });
     }
 
     console.error("UPDATE TASK ERROR:", error);
