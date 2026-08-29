@@ -86,4 +86,48 @@ const getBacklogView = async (req, res) => {
   }
 };
 
-module.exports = { getBoard, getBacklogView };
+// ----------------------------
+// Jerarquía: EPIC -> FEATURE -> STORY -> TASK/BUG de todo el proyecto, en un
+// solo request. Una sola consulta (todas las tareas del proyecto) + un
+// agrupado en memoria por parent_id, en vez de que el front tenga que pedir
+// los hijos de cada nodo por separado (1 + N). La cadena es de profundidad
+// fija (4 niveles), así que el anidado es un loop, no una consulta
+// recursiva.
+// ----------------------------
+const getTaskHierarchy = async (req, res) => {
+  const project_id = req.project.id;
+
+  try {
+    const tasks = await pool.query(
+      `${TASK_SELECT} WHERE t.project_id = $1 ORDER BY t.rank;`,
+      [project_id]
+    );
+
+    // Dos pasadas O(n), sin recursión: la primera crea un wrapper por tarea
+    // con su propio array 'children' vacío; la segunda empuja cada wrapper
+    // en el array de su padre. Como se empujan referencias al mismo objeto
+    // creado en la primera pasada, el anidado queda armado sin importar el
+    // orden de las filas ni la profundidad.
+    const byId = {};
+    for (const task of tasks.rows) {
+      byId[task.id] = { ...task, children: [] };
+    }
+    for (const task of tasks.rows) {
+      if (task.parent_id && byId[task.parent_id]) {
+        byId[task.parent_id].children.push(byId[task.id]);
+      }
+    }
+
+    const epics = tasks.rows
+      .filter((task) => task.type === 'EPIC')
+      .map((task) => byId[task.id]);
+
+    res.status(200).json({ epics });
+
+  } catch (error) {
+    console.error("GET TASK HIERARCHY ERROR:", error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+module.exports = { getBoard, getBacklogView, getTaskHierarchy };
