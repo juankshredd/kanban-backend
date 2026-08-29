@@ -36,7 +36,8 @@ describe('taskController.createTask', () => {
       type: 'STORY',
       status: 'TODO',
       rank: 3000,
-      details: {}
+      details: {},
+      parent_id: null
     };
 
     const client = { query: jest.fn(), release: jest.fn() };
@@ -60,7 +61,7 @@ describe('taskController.createTask', () => {
     expect(client.query.mock.calls[2][0]).toEqual(expect.stringContaining('COALESCE(MAX(rank), 0) + 1000'));
     expect(client.query.mock.calls[3][0]).toEqual(expect.stringContaining('INSERT INTO tasks'));
     expect(client.query.mock.calls[3][1]).toEqual([
-      'project-uuid', 5, 'user-uuid', 'New Task', 'desc', 'STORY', 3000, {}
+      'project-uuid', 5, 'user-uuid', 'New Task', 'desc', 'STORY', 3000, {}, null
     ]);
     expect(res.status).toHaveBeenCalledWith(201);
     expect(res.json).toHaveBeenCalledWith({ ...taskRow, ticket_id: 'ACM-5', project_key: 'ACM' });
@@ -113,7 +114,7 @@ describe('taskController.createTask', () => {
     await createTask(req, res);
 
     expect(client.query.mock.calls[3][1]).toEqual([
-      'project-uuid', 6, 'user-uuid', 'Broken button', null, 'BUG', 4000, { steps_to_reproduce: 'Click it' }
+      'project-uuid', 6, 'user-uuid', 'Broken button', null, 'BUG', 4000, { steps_to_reproduce: 'Click it' }, null
     ]);
     expect(res.status).toHaveBeenCalledWith(201);
   });
@@ -149,6 +150,116 @@ describe('taskController.createTask', () => {
     expect(res.json).toHaveBeenCalledWith({ message: '"steps_to_reproduce" must be a string' });
     expect(pool.connect).not.toHaveBeenCalled();
   });
+
+  it('201 + task with a valid parent_id (same project, required parent type)', async () => {
+    const taskRow = {
+      id: 'task-uuid', project_id: 'project-uuid', ticket_number: 7, user_id: 'user-uuid',
+      title: 'Login story', type: 'STORY', rank: 5000, details: {}, parent_id: 'feature-uuid'
+    };
+
+    pool.query.mockResolvedValueOnce({ rows: [{ type: 'FEATURE' }] }); // validateParentId lookup
+
+    const client = { query: jest.fn(), release: jest.fn() };
+    client.query
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce({ rows: [{ key: 'ACM', ticket_number: 7 }] })
+      .mockResolvedValueOnce({ rows: [{ next_rank: 5000 }] })
+      .mockResolvedValueOnce({ rows: [taskRow] })
+      .mockResolvedValueOnce(undefined);
+    pool.connect.mockResolvedValue(client);
+
+    const req = {
+      user: { id: 'user-uuid' },
+      project: { id: 'project-uuid' },
+      body: { title: 'Login story', type: 'story', parent_id: 'feature-uuid' }
+    };
+    const res = mockRes();
+
+    await createTask(req, res);
+
+    expect(pool.query).toHaveBeenCalledWith(expect.any(String), ['feature-uuid', 'project-uuid']);
+    expect(client.query.mock.calls[3][1]).toEqual([
+      'project-uuid', 7, 'user-uuid', 'Login story', null, 'STORY', 5000, {}, 'feature-uuid'
+    ]);
+    expect(res.status).toHaveBeenCalledWith(201);
+  });
+
+  it('400 when parent_id references a task of the wrong type', async () => {
+    pool.query.mockResolvedValueOnce({ rows: [{ type: 'EPIC' }] }); // STORY needs a FEATURE parent, not EPIC
+
+    const req = {
+      user: { id: 'user-uuid' },
+      project: { id: 'project-uuid' },
+      body: { title: 'Login story', type: 'story', parent_id: 'epic-uuid' }
+    };
+    const res = mockRes();
+
+    await createTask(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith({ message: 'parent_id must reference a FEATURE task' });
+    expect(pool.connect).not.toHaveBeenCalled();
+  });
+
+  it('400 when parent_id references a task from another project', async () => {
+    pool.query.mockResolvedValueOnce({ rows: [] }); // no row: not found in this project
+
+    const req = {
+      user: { id: 'user-uuid' },
+      project: { id: 'project-uuid' },
+      body: { title: 'Login story', type: 'story', parent_id: 'other-project-feature-uuid' }
+    };
+    const res = mockRes();
+
+    await createTask(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith({ message: 'parent_id does not belong to this project' });
+    expect(pool.connect).not.toHaveBeenCalled();
+  });
+
+  it('400 when parent_id is sent on an EPIC (which allows no parent)', async () => {
+    const req = {
+      user: { id: 'user-uuid' },
+      project: { id: 'project-uuid' },
+      body: { title: 'New epic', type: 'epic', parent_id: 'some-uuid' }
+    };
+    const res = mockRes();
+
+    await createTask(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith({ message: 'EPIC cannot have a parent' });
+    expect(pool.query).not.toHaveBeenCalled();
+    expect(pool.connect).not.toHaveBeenCalled();
+  });
+
+  it('409 when parent_id was deleted between validation and the INSERT (race)', async () => {
+    pool.query.mockResolvedValueOnce({ rows: [{ type: 'FEATURE' }] }); // validateParentId: still valid at this point
+
+    const fkError = new Error('insert or update on table "tasks" violates foreign key constraint');
+    fkError.code = '23503';
+    const client = { query: jest.fn(), release: jest.fn() };
+    client.query
+      .mockResolvedValueOnce(undefined)                                    // BEGIN
+      .mockResolvedValueOnce({ rows: [{ key: 'ACM', ticket_number: 8 }] })  // atomic counter
+      .mockResolvedValueOnce({ rows: [{ next_rank: 6000 }] })              // rank
+      .mockRejectedValueOnce(fkError)                                     // INSERT: parent_id was just deleted
+      .mockResolvedValueOnce(undefined);                                   // ROLLBACK
+    pool.connect.mockResolvedValue(client);
+
+    const req = {
+      user: { id: 'user-uuid' },
+      project: { id: 'project-uuid' },
+      body: { title: 'Login story', type: 'story', parent_id: 'feature-uuid' }
+    };
+    const res = mockRes();
+
+    await createTask(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(res.json).toHaveBeenCalledWith({ message: 'parent_id no longer exists' });
+  });
 });
 
 describe('taskController.getProjectTasks', () => {
@@ -179,6 +290,20 @@ describe('taskController.getProjectTasks', () => {
     expect(res.status).toHaveBeenCalledWith(400);
     expect(res.json).toHaveBeenCalledWith({ message: 'Invalid status value' });
     expect(pool.query).not.toHaveBeenCalled();
+  });
+
+  it('400 when the DB rejects a malformed parent_id filter', async () => {
+    const error = new Error('invalid input syntax for type uuid');
+    error.code = '22P02';
+    pool.query.mockRejectedValue(error);
+
+    const req = { project: { id: 'project-uuid' }, query: { parent_id: 'not-a-uuid' } };
+    const res = mockRes();
+
+    await getProjectTasks(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith({ message: 'Invalid sprint_id or parent_id' });
   });
 });
 
@@ -212,7 +337,7 @@ describe('taskController.getMyTasks', () => {
     await getMyTasks(req, res);
 
     expect(res.status).toHaveBeenCalledWith(400);
-    expect(res.json).toHaveBeenCalledWith({ message: 'Invalid project_id or sprint_id' });
+    expect(res.json).toHaveBeenCalledWith({ message: 'Invalid project_id, sprint_id or parent_id' });
   });
 });
 
@@ -240,7 +365,7 @@ describe('taskController.updateTask', () => {
     expect(res.json).toHaveBeenCalledWith(taskRow);
   });
 
-  it('400 when neither status, type, sprint_id, details nor after_task_id is sent', async () => {
+  it('400 when neither status, type, sprint_id, details, parent_id nor after_task_id is sent', async () => {
     const req = { project: { id: 'project-uuid' }, params: { id: 'task-uuid' }, body: {} };
     const res = mockRes();
 
@@ -248,7 +373,7 @@ describe('taskController.updateTask', () => {
 
     expect(res.status).toHaveBeenCalledWith(400);
     expect(res.json).toHaveBeenCalledWith({
-      message: 'Nothing to update: send status, type, sprint_id, details and/or after_task_id'
+      message: 'Nothing to update: send status, type, sprint_id, details, parent_id and/or after_task_id'
     });
     expect(pool.query).not.toHaveBeenCalled();
   });
@@ -317,18 +442,19 @@ describe('taskController.updateTask', () => {
 
     await updateTask(req, res);
 
-    expect(pool.query.mock.calls[0][0]).toEqual(expect.stringContaining('SELECT type FROM tasks'));
+    expect(pool.query.mock.calls[0][0]).toEqual(expect.stringContaining('SELECT type, details, parent_id, sprint_id FROM tasks'));
     expect(pool.query.mock.calls[1][0]).toEqual(expect.stringContaining('details = $'));
     expect(pool.query.mock.calls[1][1]).toContainEqual({ expected_behavior: 'Opens' });
     expect(res.status).toHaveBeenCalledWith(200);
     expect(res.json).toHaveBeenCalledWith(taskRow);
   });
 
-  it('200 updates type and details together, validated against the new type with no extra lookup', async () => {
+  it('200 updates type and details together, no extra lookup for details (parent_id still re-checked once)', async () => {
     const taskRow = { id: 'task-uuid', ticket_id: 'ACM-1', type: 'BUG', details: { steps_to_reproduce: 'Click it' } };
     pool.query
-      .mockResolvedValueOnce({ rows: [{ id: 'task-uuid' }] }) // UPDATE tasks
-      .mockResolvedValueOnce({ rows: [taskRow] });            // re-read via TASK_SELECT
+      .mockResolvedValueOnce({ rows: [{ type: 'STORY', parent_id: null }] }) // current row (for parent_id re-check)
+      .mockResolvedValueOnce({ rows: [{ id: 'task-uuid' }] })                // UPDATE tasks
+      .mockResolvedValueOnce({ rows: [taskRow] });                          // re-read via TASK_SELECT
 
     const req = {
       project: { id: 'project-uuid' },
@@ -339,9 +465,141 @@ describe('taskController.updateTask', () => {
 
     await updateTask(req, res);
 
-    expect(pool.query).toHaveBeenCalledTimes(2); // no current-type lookup: type was sent
+    // effectiveType for 'details' comes straight from typeNormalized (no extra
+    // query for that); the single current-row fetch is only for re-validating
+    // the existing (null) parent_id against the new type.
+    expect(pool.query).toHaveBeenCalledTimes(3);
     expect(res.status).toHaveBeenCalledWith(200);
     expect(res.json).toHaveBeenCalledWith(taskRow);
+  });
+
+  it('200 updates details and parent_id together, needing exactly one current-row lookup (not two)', async () => {
+    const taskRow = { id: 'task-uuid', ticket_id: 'ACM-1', type: 'BUG', details: { expected_behavior: 'Opens' }, parent_id: 'story-uuid' };
+    pool.query
+      .mockResolvedValueOnce({ rows: [{ type: 'BUG' }] })          // single current-row fetch (type, for effectiveType)
+      .mockResolvedValueOnce({ rows: [{ type: 'STORY' }] })        // parent_id ownership+type check
+      .mockResolvedValueOnce({ rows: [{ id: 'task-uuid' }] })      // UPDATE tasks
+      .mockResolvedValueOnce({ rows: [taskRow] });                 // re-read via TASK_SELECT
+
+    const req = {
+      project: { id: 'project-uuid' },
+      params: { id: 'task-uuid' },
+      body: { details: { expected_behavior: 'Opens' }, parent_id: 'story-uuid' }
+    };
+    const res = mockRes();
+
+    await updateTask(req, res);
+
+    // Exactly one "current row" lookup even though both details and parent_id
+    // need the task's current type — regression guard for the consolidation.
+    expect(pool.query).toHaveBeenCalledTimes(4);
+    expect(pool.query.mock.calls[0][0]).toEqual(expect.stringContaining('SELECT type, details, parent_id, sprint_id FROM tasks'));
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(res.json).toHaveBeenCalledWith(taskRow);
+  });
+
+  it('200 sets parent_id on a valid same-project parent of the required type', async () => {
+    const taskRow = { id: 'task-uuid', ticket_id: 'ACM-1', type: 'STORY', parent_id: 'feature-uuid' };
+    pool.query
+      .mockResolvedValueOnce({ rows: [{ type: 'TASK', details: {} }] }) // current-row fetch (details-vs-new-type guard)
+      .mockResolvedValueOnce({ rows: [{ type: 'FEATURE' }] })           // validateParentId: parent lookup
+      .mockResolvedValueOnce({ rows: [{ id: 'task-uuid' }] })           // UPDATE tasks
+      .mockResolvedValueOnce({ rows: [taskRow] });                      // re-read via TASK_SELECT
+
+    const req = {
+      project: { id: 'project-uuid' },
+      params: { id: 'task-uuid' },
+      body: { type: 'story', parent_id: 'feature-uuid' }
+    };
+    const res = mockRes();
+
+    await updateTask(req, res);
+
+    expect(pool.query.mock.calls[1][1]).toEqual(['feature-uuid', 'project-uuid']);
+    expect(pool.query.mock.calls[2][0]).toEqual(expect.stringContaining('parent_id = $'));
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(res.json).toHaveBeenCalledWith(taskRow);
+  });
+
+  it('200 detaches parent_id when sent as null (no lookup needed)', async () => {
+    const taskRow = { id: 'task-uuid', ticket_id: 'ACM-1', parent_id: null };
+    pool.query
+      .mockResolvedValueOnce({ rows: [{ id: 'task-uuid' }] }) // UPDATE tasks
+      .mockResolvedValueOnce({ rows: [taskRow] });            // re-read via TASK_SELECT
+
+    const req = {
+      project: { id: 'project-uuid' },
+      params: { id: 'task-uuid' },
+      body: { parent_id: null }
+    };
+    const res = mockRes();
+
+    await updateTask(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(2);
+    expect(pool.query.mock.calls[0][0]).toEqual(expect.stringContaining('parent_id = NULL'));
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(res.json).toHaveBeenCalledWith(taskRow);
+  });
+
+  it('400 when parent_id references a task of the wrong type', async () => {
+    pool.query
+      .mockResolvedValueOnce({ rows: [{ type: 'TASK', details: {} }] }) // current-row fetch (details-vs-new-type guard)
+      .mockResolvedValueOnce({ rows: [{ type: 'EPIC' }] });             // wrong type for a STORY's parent
+
+    const req = {
+      project: { id: 'project-uuid' },
+      params: { id: 'task-uuid' },
+      body: { type: 'story', parent_id: 'epic-uuid' }
+    };
+    const res = mockRes();
+
+    await updateTask(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith({ message: 'parent_id must reference a FEATURE task' });
+  });
+
+  it('400 when changing type would leave an existing parent_id incompatible', async () => {
+    // Tarea actualmente FEATURE con padre EPIC; pasarla a TASK dejaría ese
+    // padre huérfano (TASK requiere padre STORY).
+    pool.query.mockResolvedValueOnce({ rows: [{ type: 'FEATURE', parent_id: 'epic-uuid' }] })
+      .mockResolvedValueOnce({ rows: [{ type: 'EPIC' }] }); // re-check: parent's actual type
+
+    const req = {
+      project: { id: 'project-uuid' },
+      params: { id: 'task-uuid' },
+      body: { type: 'task' }
+    };
+    const res = mockRes();
+
+    await updateTask(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith({
+      message: expect.stringContaining('existing parent_id is incompatible with the new type')
+    });
+  });
+
+  it('409 when parent_id was deleted between validation and the UPDATE (race)', async () => {
+    const fkError = new Error('update on table "tasks" violates foreign key constraint');
+    fkError.code = '23503';
+    pool.query
+      .mockResolvedValueOnce({ rows: [{ type: 'TASK', details: {} }] }) // current-row fetch (details-vs-new-type guard)
+      .mockResolvedValueOnce({ rows: [{ type: 'FEATURE' }] })           // validateParentId: still valid at this point
+      .mockRejectedValueOnce(fkError);                                 // UPDATE: parent_id was just deleted
+
+    const req = {
+      project: { id: 'project-uuid' },
+      params: { id: 'task-uuid' },
+      body: { type: 'story', parent_id: 'feature-uuid' }
+    };
+    const res = mockRes();
+
+    await updateTask(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(res.json).toHaveBeenCalledWith({ message: 'parent_id no longer exists' });
   });
 
   it('400 when details has a key invalid for the effective type', async () => {
@@ -472,5 +730,21 @@ describe('taskController.deleteTask', () => {
       message: 'Only tasks with status TODO can be deleted'
     });
     expect(pool.query).toHaveBeenCalledTimes(1);
+  });
+
+  it('409 when the task still has child tasks (FK violation on delete)', async () => {
+    const fkError = new Error('update or delete on table "tasks" violates foreign key constraint');
+    fkError.code = '23503';
+    pool.query
+      .mockResolvedValueOnce({ rows: [{ status: 'TODO' }] }) // SELECT status
+      .mockRejectedValueOnce(fkError);                       // DELETE, blocked by a child's parent_id FK
+
+    const req = { project: { id: 'project-uuid' }, params: { id: 'task-uuid' } };
+    const res = mockRes();
+
+    await deleteTask(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(res.json).toHaveBeenCalledWith({ message: 'Cannot delete: task has child tasks' });
   });
 });

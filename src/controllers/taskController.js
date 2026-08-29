@@ -3,16 +3,30 @@ const pool = require('../db');
 // ----------------------------
 // Tipos y estados permitidos
 // ----------------------------
-const TASK_TYPES = ['EPIC', 'STORY', 'TASK', 'BUG'];
+const TASK_TYPES = ['EPIC', 'FEATURE', 'STORY', 'TASK', 'BUG'];
 const DEFAULT_TASK_TYPE = 'STORY';
 
 // Campos propios de `details` según el tipo de tarjeta. Único lugar a tocar
 // para agregar un campo o un tipo nuevo: no hace falta migración.
 const TASK_DETAIL_FIELDS = {
   EPIC: [],
+  FEATURE: [],
   STORY: ['acceptance_criteria'],
   TASK: [],
   BUG: ['steps_to_reproduce', 'expected_behavior', 'actual_behavior']
+};
+
+// Jerarquía de tarjetas: EPIC -> FEATURE -> STORY -> TASK/BUG, un solo nivel
+// de padre por tarea. Cadena fija (no anidamiento libre): cada tipo admite
+// exactamente un tipo de padre, o ninguno. Esto hace que un ciclo sea
+// estructuralmente imposible (el tipo de padre requerido nunca es igual al
+// tipo propio), así que no hace falta recorrer ancestros para validar.
+const TASK_PARENT_TYPE = {
+  EPIC: null,
+  FEATURE: 'EPIC',
+  STORY: 'FEATURE',
+  TASK: 'STORY',
+  BUG: 'STORY'
 };
 
 const STATUS_MAP = {
@@ -40,6 +54,7 @@ const TASK_SELECT = `
     t.sprint_id,
     t.rank,
     t.details,
+    t.parent_id,
     p.key AS project_key,
     p.name AS project_name,
     t.user_id,
@@ -84,13 +99,46 @@ const normalizeDetails = (type, details) => {
   return { value: normalized };
 };
 
+// Valida parent_id contra TASK_PARENT_TYPE: null/undefined siempre es válido
+// (sin padre); si el tipo hijo no admite padre, cualquier valor no-null es
+// error; si lo admite, el padre tiene que existir en el mismo proyecto y ser
+// del tipo requerido. Una sola consulta, reusada por createTask y las dos
+// veces que updateTask la necesita (padre nuevo, o padre existente que hay
+// que re-validar porque el tipo cambió).
+const validateParentId = async (parentId, childType, projectId) => {
+  if (parentId === null || parentId === undefined) {
+    return { value: null };
+  }
+
+  const requiredParentType = TASK_PARENT_TYPE[childType];
+
+  if (!requiredParentType) {
+    return { error: `${childType} cannot have a parent` };
+  }
+
+  const parent = await pool.query(
+    `SELECT type FROM tasks WHERE id = $1 AND project_id = $2;`,
+    [parentId, projectId]
+  );
+
+  if (parent.rows.length === 0) {
+    return { error: 'parent_id does not belong to this project' };
+  }
+
+  if (parent.rows[0].type !== requiredParentType) {
+    return { error: `parent_id must reference a ${requiredParentType} task` };
+  }
+
+  return { value: parentId };
+};
+
 // ----------------------------
 // Crear tarea dentro de un proyecto
 // ----------------------------
 const createTask = async (req, res) => {
   const user_id = req.user.id;
   const project_id = req.project.id;      // lo dejó el middleware de acceso
-  const { title, description, type, details } = req.body || {};
+  const { title, description, type, details, parent_id } = req.body || {};
 
   if (!title || typeof title !== 'string' || !title.trim()) {
     return res.status(400).json({ message: 'Title is required' });
@@ -114,6 +162,22 @@ const createTask = async (req, res) => {
     }
 
     detailsNormalized = value;
+  }
+
+  let parentIdNormalized = null;
+  try {
+    const { error: parentError, value } = await validateParentId(parent_id ?? null, typeNormalized, project_id);
+
+    if (parentError) {
+      return res.status(400).json({ message: parentError });
+    }
+
+    parentIdNormalized = value;
+  } catch (error) {
+    if (error.code === '22P02') {
+      return res.status(400).json({ message: 'Invalid parent_id' });
+    }
+    throw error;
   }
 
   // El número de ticket sale de un contador por proyecto que se incrementa de
@@ -147,11 +211,11 @@ const createTask = async (req, res) => {
 
     const newTask = await client.query(
       `
-      INSERT INTO tasks (id, project_id, ticket_number, user_id, title, description, type, rank, details)
-      VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8)
+      INSERT INTO tasks (id, project_id, ticket_number, user_id, title, description, type, rank, details, parent_id)
+      VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9)
       RETURNING *;
       `,
-      [project_id, ticket_number, user_id, title.trim(), description || null, typeNormalized, nextRank, detailsNormalized]
+      [project_id, ticket_number, user_id, title.trim(), description || null, typeNormalized, nextRank, detailsNormalized, parentIdNormalized]
     );
 
     await client.query('COMMIT');
@@ -164,6 +228,14 @@ const createTask = async (req, res) => {
 
   } catch (error) {
     await client.query('ROLLBACK');
+
+    // parent_id existía en la validación previa pero fue borrado antes de que
+    // este INSERT corriera (carrera entre requests). Mismo código que
+    // deleteTask usa para "todavía hay algo apuntando a esto".
+    if (error.code === '23503') {
+      return res.status(409).json({ message: 'parent_id no longer exists' });
+    }
+
     console.error("CREATE TASK ERROR:", error);
     res.status(500).json({ message: 'Server error' });
 
@@ -203,6 +275,18 @@ const buildTaskFilters = (query, values) => {
     }
   }
 
+  // parent_id=none es la palabra clave equivalente para "sin padre" (tareas
+  // raíz, EPICs). Sirve para listar los hijos directos de un nodo sin un
+  // endpoint nuevo.
+  if (query.parent_id !== undefined) {
+    if (query.parent_id === 'none') {
+      filters.push('t.parent_id IS NULL');
+    } else {
+      values.push(query.parent_id);
+      filters.push(`t.parent_id = $${values.length}`);
+    }
+  }
+
   return { filters };
 };
 
@@ -231,9 +315,9 @@ const getProjectTasks = async (req, res) => {
     res.status(200).json(tasks.rows);
 
   } catch (error) {
-    // uuid mal formado en el filtro sprint_id
+    // uuid mal formado en el filtro sprint_id o parent_id
     if (error.code === '22P02') {
-      return res.status(400).json({ message: 'Invalid sprint_id' });
+      return res.status(400).json({ message: 'Invalid sprint_id or parent_id' });
     }
 
     console.error("GET PROJECT TASKS ERROR:", error);
@@ -274,9 +358,9 @@ const getMyTasks = async (req, res) => {
     res.status(200).json(tasks.rows);
 
   } catch (error) {
-    // uuid mal formado en el filtro project_id o sprint_id
+    // uuid mal formado en el filtro project_id, sprint_id o parent_id
     if (error.code === '22P02') {
-      return res.status(400).json({ message: 'Invalid project_id or sprint_id' });
+      return res.status(400).json({ message: 'Invalid project_id, sprint_id or parent_id' });
     }
 
     console.error("GET MY TASKS ERROR:", error);
@@ -303,10 +387,12 @@ const updateTask = async (req, res) => {
   // "lo mandaron en {}" (borrar todos los campos del tipo actual).
   const hasDetails = Object.prototype.hasOwnProperty.call(body, 'details');
   const { details } = body;
+  const hasParentId = Object.prototype.hasOwnProperty.call(body, 'parent_id');
+  const { parent_id } = body;
 
-  if (status === undefined && type === undefined && !hasSprintId && !hasAfterTaskId && !hasDetails) {
+  if (status === undefined && type === undefined && !hasSprintId && !hasAfterTaskId && !hasDetails && !hasParentId) {
     return res.status(400).json({
-      message: 'Nothing to update: send status, type, sprint_id, details and/or after_task_id'
+      message: 'Nothing to update: send status, type, sprint_id, details, parent_id and/or after_task_id'
     });
   }
 
@@ -338,15 +424,23 @@ const updateTask = async (req, res) => {
     updates.push(`type = $${values.length}`);
   }
 
-  // El tipo cambia pero 'details' no viene en este request: hay que chequear
-  // que los details ya guardados sigan siendo válidos para el tipo nuevo (si
-  // no, quedarían campos huérfanos de un tipo que la tarea ya no tiene). Pasa
-  // también cuando esto se llama desde updateTaskType, que reenvía solo
-  // { type }.
-  if (typeNormalized && !hasDetails) {
+  // Varios bloques de más abajo necesitan "el valor actual de un campo que
+  // este request no toca" (details/parent_id cuando cambia el tipo, sprint_id
+  // cuando llega after_task_id solo, type cuando llega details/parent_id
+  // solos). Antes cada uno hacía su propio SELECT; se consolida en una sola
+  // consulta para no repetir un round trip por campo.
+  const needsCurrentRow =
+    (hasDetails && !typeNormalized) ||
+    (typeNormalized && !hasDetails) ||
+    (hasParentId && parent_id !== null && !typeNormalized) ||
+    (typeNormalized && !hasParentId) ||
+    (hasAfterTaskId && !hasSprintId);
+
+  let currentRow = null;
+  if (needsCurrentRow) {
     try {
       const current = await pool.query(
-        `SELECT details FROM tasks WHERE id = $1 AND project_id = $2;`,
+        `SELECT type, details, parent_id, sprint_id FROM tasks WHERE id = $1 AND project_id = $2;`,
         [id, project_id]
       );
 
@@ -354,11 +448,40 @@ const updateTask = async (req, res) => {
         return res.status(404).json({ message: 'Task not found' });
       }
 
-      const { error: detailsError } = normalizeDetails(typeNormalized, current.rows[0].details || {});
+      currentRow = current.rows[0];
+    } catch (error) {
+      if (error.code === '22P02') {
+        return res.status(404).json({ message: 'Task not found' });
+      }
+      throw error;
+    }
+  }
 
-      if (detailsError) {
+  // El tipo cambia pero 'details' no viene en este request: hay que chequear
+  // que los details ya guardados sigan siendo válidos para el tipo nuevo (si
+  // no, quedarían campos huérfanos de un tipo que la tarea ya no tiene). Pasa
+  // también cuando esto se llama desde updateTaskType, que reenvía solo
+  // { type }.
+  if (typeNormalized && !hasDetails) {
+    const { error: detailsError } = normalizeDetails(typeNormalized, currentRow.details || {});
+
+    if (detailsError) {
+      return res.status(400).json({
+        message: `Cannot change type: existing details are incompatible with the new type (${detailsError}). Send details explicitly to update them.`
+      });
+    }
+  }
+
+  // Simétrico para parent_id: el tipo cambia y parent_id no viene en este
+  // request -> el padre ya guardado tiene que seguir siendo válido para el
+  // tipo nuevo (un FEATURE que pasa a TASK no puede seguir colgado de un EPIC).
+  if (typeNormalized && !hasParentId) {
+    try {
+      const { error: parentError } = await validateParentId(currentRow.parent_id, typeNormalized, project_id);
+
+      if (parentError) {
         return res.status(400).json({
-          message: `Cannot change type: existing details are incompatible with the new type (${detailsError}). Send details explicitly to update them.`
+          message: `Cannot change type: existing parent_id is incompatible with the new type (${parentError}). Send parent_id explicitly to update it.`
         });
       }
     } catch (error) {
@@ -370,29 +493,9 @@ const updateTask = async (req, res) => {
   }
 
   if (hasDetails) {
-    // Si el tipo no cambia en este mismo request, hay que leer el actual para
-    // saber contra qué lista de campos validar 'details'.
-    let effectiveType = typeNormalized;
-
-    if (!effectiveType) {
-      try {
-        const current = await pool.query(
-          `SELECT type FROM tasks WHERE id = $1 AND project_id = $2;`,
-          [id, project_id]
-        );
-
-        if (current.rows.length === 0) {
-          return res.status(404).json({ message: 'Task not found' });
-        }
-
-        effectiveType = current.rows[0].type;
-      } catch (error) {
-        if (error.code === '22P02') {
-          return res.status(404).json({ message: 'Task not found' });
-        }
-        throw error;
-      }
-    }
+    // Si el tipo no cambia en este mismo request, effectiveType sale del
+    // currentRow ya cargado arriba.
+    const effectiveType = typeNormalized || currentRow.type;
 
     const { error: detailsError, value: detailsValue } = normalizeDetails(effectiveType, details);
 
@@ -402,6 +505,31 @@ const updateTask = async (req, res) => {
 
     values.push(detailsValue);
     updates.push(`details = $${values.length}`);
+  }
+
+  if (hasParentId) {
+    if (parent_id === null) {
+      // Desvincular del padre.
+      updates.push('parent_id = NULL');
+    } else {
+      const effectiveType = typeNormalized || currentRow.type;
+
+      try {
+        const { error: parentError, value } = await validateParentId(parent_id, effectiveType, project_id);
+
+        if (parentError) {
+          return res.status(400).json({ message: parentError });
+        }
+
+        values.push(value);
+        updates.push(`parent_id = $${values.length}`);
+      } catch (error) {
+        if (error.code === '22P02') {
+          return res.status(400).json({ message: 'Invalid parent_id' });
+        }
+        throw error;
+      }
+    }
   }
 
   if (hasSprintId) {
@@ -440,16 +568,7 @@ const updateTask = async (req, res) => {
       let destinationSprintId = sprint_id;
 
       if (!hasSprintId) {
-        const current = await pool.query(
-          `SELECT sprint_id FROM tasks WHERE id = $1 AND project_id = $2;`,
-          [id, project_id]
-        );
-
-        if (current.rows.length === 0) {
-          return res.status(404).json({ message: 'Task not found' });
-        }
-
-        destinationSprintId = current.rows[0].sprint_id;
+        destinationSprintId = currentRow.sprint_id;
       }
 
       // IS NOT DISTINCT FROM (no '='): sprint_id NULL es una lista válida
@@ -522,6 +641,12 @@ const updateTask = async (req, res) => {
       return res.status(404).json({ message: 'Task not found' });
     }
 
+    // Igual que en createTask: parent_id era válido al validarlo pero fue
+    // borrado antes de que este UPDATE corriera.
+    if (error.code === '23503') {
+      return res.status(409).json({ message: 'parent_id no longer exists' });
+    }
+
     console.error("UPDATE TASK ERROR:", error);
     res.status(500).json({ message: 'Server error' });
   }
@@ -574,6 +699,12 @@ const deleteTask = async (req, res) => {
   } catch (error) {
     if (error.code === '22P02') {
       return res.status(404).json({ message: 'Task not found' });
+    }
+
+    // FK de parent_id (ON DELETE por defecto es RESTRICT): la tarea todavía
+    // tiene hijos, no se puede borrar sin desvincularlos o borrarlos antes.
+    if (error.code === '23503') {
+      return res.status(409).json({ message: 'Cannot delete: task has child tasks' });
     }
 
     console.error("DELETE TASK ERROR:", error);
