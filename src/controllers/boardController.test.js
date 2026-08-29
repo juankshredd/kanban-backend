@@ -4,7 +4,7 @@ jest.mock('../db', () => ({
 }));
 
 const pool = require('../db');
-const { getBoard, getBacklogView } = require('./boardController');
+const { getBoard, getBacklogView, getTaskHierarchy } = require('./boardController');
 
 const mockRes = () => {
   const res = {};
@@ -90,6 +90,90 @@ describe('boardController.getBacklogView', () => {
     const res = mockRes();
 
     await getBacklogView(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(500);
+    expect(res.json).toHaveBeenCalledWith({ message: 'Server error' });
+  });
+});
+
+describe('boardController.getTaskHierarchy', () => {
+  afterEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('200 + nests EPIC -> FEATURE -> STORY -> TASK/BUG from one flat query', async () => {
+    const epic = { id: 'epic-1', type: 'EPIC', parent_id: null };
+    const feature = { id: 'feature-1', type: 'FEATURE', parent_id: 'epic-1' };
+    const story = { id: 'story-1', type: 'STORY', parent_id: 'feature-1' };
+    const task = { id: 'task-1', type: 'TASK', parent_id: 'story-1' };
+    const bug = { id: 'bug-1', type: 'BUG', parent_id: 'story-1' };
+
+    // Orden deliberadamente mezclado: el agrupado no depende del orden de filas.
+    pool.query.mockResolvedValueOnce({ rows: [task, epic, bug, story, feature] });
+
+    const req = { project: { id: 'project-uuid' } };
+    const res = mockRes();
+
+    await getTaskHierarchy(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(1); // una sola consulta sin importar el tamaño del árbol
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(res.json).toHaveBeenCalledWith({
+      roots: [
+        {
+          ...epic,
+          children: [
+            {
+              ...feature,
+              children: [
+                {
+                  ...story,
+                  children: [
+                    { ...task, children: [] },
+                    { ...bug, children: [] }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    });
+  });
+
+  it('200 + a non-EPIC task with no parent still appears as a root (not silently dropped)', async () => {
+    const orphanStory = { id: 'story-2', type: 'STORY', parent_id: null };
+
+    pool.query.mockResolvedValueOnce({ rows: [orphanStory] });
+
+    const req = { project: { id: 'project-uuid' } };
+    const res = mockRes();
+
+    await getTaskHierarchy(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(res.json).toHaveBeenCalledWith({ roots: [{ ...orphanStory, children: [] }] });
+  });
+
+  it('200 + empty roots list when the project has no tasks', async () => {
+    pool.query.mockResolvedValueOnce({ rows: [] });
+
+    const req = { project: { id: 'project-uuid' } };
+    const res = mockRes();
+
+    await getTaskHierarchy(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(res.json).toHaveBeenCalledWith({ roots: [] });
+  });
+
+  it('500 when the query fails', async () => {
+    pool.query.mockRejectedValue(new Error('connection lost'));
+
+    const req = { project: { id: 'project-uuid' } };
+    const res = mockRes();
+
+    await getTaskHierarchy(req, res);
 
     expect(res.status).toHaveBeenCalledWith(500);
     expect(res.json).toHaveBeenCalledWith({ message: 'Server error' });
