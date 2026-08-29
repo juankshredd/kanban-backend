@@ -35,7 +35,8 @@ describe('taskController.createTask', () => {
       description: 'desc',
       type: 'STORY',
       status: 'TODO',
-      rank: 3000
+      rank: 3000,
+      details: {}
     };
 
     const client = { query: jest.fn(), release: jest.fn() };
@@ -59,7 +60,7 @@ describe('taskController.createTask', () => {
     expect(client.query.mock.calls[2][0]).toEqual(expect.stringContaining('COALESCE(MAX(rank), 0) + 1000'));
     expect(client.query.mock.calls[3][0]).toEqual(expect.stringContaining('INSERT INTO tasks'));
     expect(client.query.mock.calls[3][1]).toEqual([
-      'project-uuid', 5, 'user-uuid', 'New Task', 'desc', 'STORY', 3000
+      'project-uuid', 5, 'user-uuid', 'New Task', 'desc', 'STORY', 3000, {}
     ]);
     expect(res.status).toHaveBeenCalledWith(201);
     expect(res.json).toHaveBeenCalledWith({ ...taskRow, ticket_id: 'ACM-5', project_key: 'ACM' });
@@ -74,6 +75,78 @@ describe('taskController.createTask', () => {
 
     expect(res.status).toHaveBeenCalledWith(400);
     expect(res.json).toHaveBeenCalledWith({ message: 'Title is required' });
+    expect(pool.connect).not.toHaveBeenCalled();
+  });
+
+  it('201 + task with valid details for the type (BUG)', async () => {
+    const taskRow = {
+      id: 'task-uuid',
+      project_id: 'project-uuid',
+      ticket_number: 6,
+      user_id: 'user-uuid',
+      title: 'Broken button',
+      type: 'BUG',
+      rank: 4000,
+      details: { steps_to_reproduce: 'Click it' }
+    };
+
+    const client = { query: jest.fn(), release: jest.fn() };
+    client.query
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce({ rows: [{ key: 'ACM', ticket_number: 6 }] })
+      .mockResolvedValueOnce({ rows: [{ next_rank: 4000 }] })
+      .mockResolvedValueOnce({ rows: [taskRow] })
+      .mockResolvedValueOnce(undefined);
+    pool.connect.mockResolvedValue(client);
+
+    const req = {
+      user: { id: 'user-uuid' },
+      project: { id: 'project-uuid' },
+      body: {
+        title: 'Broken button',
+        type: 'bug',
+        details: { steps_to_reproduce: '  Click it  ' }
+      }
+    };
+    const res = mockRes();
+
+    await createTask(req, res);
+
+    expect(client.query.mock.calls[3][1]).toEqual([
+      'project-uuid', 6, 'user-uuid', 'Broken button', null, 'BUG', 4000, { steps_to_reproduce: 'Click it' }
+    ]);
+    expect(res.status).toHaveBeenCalledWith(201);
+  });
+
+  it('400 when details has a key not valid for the type', async () => {
+    const req = {
+      user: { id: 'user-uuid' },
+      project: { id: 'project-uuid' },
+      body: { title: 'Broken button', type: 'bug', details: { acceptance_criteria: 'nope' } }
+    };
+    const res = mockRes();
+
+    await createTask(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith({
+      message: '"acceptance_criteria" is not a valid detail field for type BUG'
+    });
+    expect(pool.connect).not.toHaveBeenCalled();
+  });
+
+  it('400 when a detail value is not a string', async () => {
+    const req = {
+      user: { id: 'user-uuid' },
+      project: { id: 'project-uuid' },
+      body: { title: 'Broken button', type: 'bug', details: { steps_to_reproduce: 42 } }
+    };
+    const res = mockRes();
+
+    await createTask(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith({ message: '"steps_to_reproduce" must be a string' });
     expect(pool.connect).not.toHaveBeenCalled();
   });
 });
@@ -167,7 +240,7 @@ describe('taskController.updateTask', () => {
     expect(res.json).toHaveBeenCalledWith(taskRow);
   });
 
-  it('400 when neither status, type, sprint_id nor after_task_id is sent', async () => {
+  it('400 when neither status, type, sprint_id, details nor after_task_id is sent', async () => {
     const req = { project: { id: 'project-uuid' }, params: { id: 'task-uuid' }, body: {} };
     const res = mockRes();
 
@@ -175,7 +248,7 @@ describe('taskController.updateTask', () => {
 
     expect(res.status).toHaveBeenCalledWith(400);
     expect(res.json).toHaveBeenCalledWith({
-      message: 'Nothing to update: send status, type, sprint_id and/or after_task_id'
+      message: 'Nothing to update: send status, type, sprint_id, details and/or after_task_id'
     });
     expect(pool.query).not.toHaveBeenCalled();
   });
@@ -226,6 +299,83 @@ describe('taskController.updateTask', () => {
     expect(res.json).toHaveBeenCalledWith({
       message: 'after_task_id does not belong to the destination list'
     });
+  });
+
+  it('200 updates details alone, looking up the current type to validate against', async () => {
+    const taskRow = { id: 'task-uuid', ticket_id: 'ACM-1', type: 'BUG', details: { expected_behavior: 'Opens' } };
+    pool.query
+      .mockResolvedValueOnce({ rows: [{ type: 'BUG' }] })      // current-type lookup
+      .mockResolvedValueOnce({ rows: [{ id: 'task-uuid' }] })  // UPDATE tasks
+      .mockResolvedValueOnce({ rows: [taskRow] });             // re-read via TASK_SELECT
+
+    const req = {
+      project: { id: 'project-uuid' },
+      params: { id: 'task-uuid' },
+      body: { details: { expected_behavior: '  Opens  ' } }
+    };
+    const res = mockRes();
+
+    await updateTask(req, res);
+
+    expect(pool.query.mock.calls[0][0]).toEqual(expect.stringContaining('SELECT type FROM tasks'));
+    expect(pool.query.mock.calls[1][0]).toEqual(expect.stringContaining('details = $'));
+    expect(pool.query.mock.calls[1][1]).toContainEqual({ expected_behavior: 'Opens' });
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(res.json).toHaveBeenCalledWith(taskRow);
+  });
+
+  it('200 updates type and details together, validated against the new type with no extra lookup', async () => {
+    const taskRow = { id: 'task-uuid', ticket_id: 'ACM-1', type: 'BUG', details: { steps_to_reproduce: 'Click it' } };
+    pool.query
+      .mockResolvedValueOnce({ rows: [{ id: 'task-uuid' }] }) // UPDATE tasks
+      .mockResolvedValueOnce({ rows: [taskRow] });            // re-read via TASK_SELECT
+
+    const req = {
+      project: { id: 'project-uuid' },
+      params: { id: 'task-uuid' },
+      body: { type: 'bug', details: { steps_to_reproduce: 'Click it' } }
+    };
+    const res = mockRes();
+
+    await updateTask(req, res);
+
+    expect(pool.query).toHaveBeenCalledTimes(2); // no current-type lookup: type was sent
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(res.json).toHaveBeenCalledWith(taskRow);
+  });
+
+  it('400 when details has a key invalid for the effective type', async () => {
+    pool.query.mockResolvedValueOnce({ rows: [{ type: 'STORY' }] }); // current-type lookup
+
+    const req = {
+      project: { id: 'project-uuid' },
+      params: { id: 'task-uuid' },
+      body: { details: { steps_to_reproduce: 'Click it' } }
+    };
+    const res = mockRes();
+
+    await updateTask(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith({
+      message: '"steps_to_reproduce" is not a valid detail field for type STORY'
+    });
+  });
+
+  it('404 when the current-type lookup finds no matching task', async () => {
+    pool.query.mockResolvedValueOnce({ rows: [] }); // current-type lookup, no match
+
+    const req = {
+      project: { id: 'project-uuid' },
+      params: { id: 'task-uuid' },
+      body: { details: { acceptance_criteria: 'Done when...' } }
+    };
+    const res = mockRes();
+
+    await updateTask(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(404);
+    expect(res.json).toHaveBeenCalledWith({ message: 'Task not found' });
   });
 });
 

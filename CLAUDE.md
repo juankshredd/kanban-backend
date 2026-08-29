@@ -52,7 +52,7 @@ Schema changes live in `migrations/*.sql`, applied in filename order by `scripts
 ### Data model
 
 - `users` table: `id`, `username`, `email`, `password_hash` (bcrypt-hashed), `is_active` (boolean, used for soft deactivate/reactivate).
-- `tasks` table: `id` (uuid, `gen_random_uuid()`), `user_id` (FK to users), `title`, `description`, `status` (Postgres ENUM: `TODO`, `IN_PROGRESS`, `DONE`), `type` (Postgres ENUM: `EPIC`, `STORY`, `TASK`, `BUG`, defaults to `STORY`), `project_id` (FK to projects), `ticket_number` (int), `rank` (`numeric`, `NOT NULL` — manual Board/Backlog ordering, one global sequence per project; see "Board & Backlog rules"), `created_at`, `updated_at`.
+- `tasks` table: `id` (uuid, `gen_random_uuid()`), `user_id` (FK to users), `title`, `description`, `status` (Postgres ENUM: `TODO`, `IN_PROGRESS`, `DONE`), `type` (Postgres ENUM: `EPIC`, `STORY`, `TASK`, `BUG`, defaults to `STORY`), `project_id` (FK to projects), `ticket_number` (int), `rank` (`numeric`, `NOT NULL` — manual Board/Backlog ordering, one global sequence per project; see "Board & Backlog rules"), `details` (`jsonb`, `NOT NULL DEFAULT '{}'` — type-specific fields, see "Task detail fields" below), `created_at`, `updated_at`.
 - `companies` table: `id` (uuid), `name`, `description`, `created_by` (FK to users), timestamps. The top-level container above projects — no `key`/ticket-prefix concept, since ticket ids are still derived per-project, not per-company.
 - `company_members` table: `(company_id, user_id)` unique, `role` (Postgres ENUM: `OWNER`, `MEMBER`) — same shape as `project_members`, one level up.
 - `projects` table: `id` (uuid), `key` (unique, `^[A-Z][A-Z0-9]{1,9}$` — the visible ticket prefix), `name`, `description`, `created_by` (FK to users), `company_id` (FK to companies, `NOT NULL`, `ON DELETE CASCADE`), `next_ticket_number` (atomic counter), timestamps.
@@ -98,9 +98,15 @@ Tasks are authorized by **project membership**, not by `tasks.user_id` (which is
 - `/api/projects/:projectId/tasks` — canonical, the board of one project. Behind `requireProjectMember`.
 - `/api/tasks` — cross-project. `GET` is the "my work" view across every project the user belongs to (optional `?project_id=`), `POST` requires `project_id` in the body, and `PATCH`/`DELETE /:id` resolve the project from the task itself.
 
-Handlers read the project from `req.project.id` and scope every query with `WHERE id = $1 AND project_id = $2`, so a task from another project can't be reached through a project you do belong to. `PATCH` accepts `status`, `type`, `sprint_id` and/or `after_task_id` (at least one). Deletion is still restricted to tasks with `status = 'TODO'`.
+Handlers read the project from `req.project.id` and scope every query with `WHERE id = $1 AND project_id = $2`, so a task from another project can't be reached through a project you do belong to. `PATCH` accepts `status`, `type`, `sprint_id`, `details` and/or `after_task_id` (at least one). Deletion is still restricted to tasks with `status = 'TODO'`.
 
 `sprint_id` uses `hasOwnProperty` rather than `!== undefined` to tell "not sent" from "sent as `null`" — the latter is how a task moves back to the Backlog. A non-null `sprint_id` is validated against `sprints.project_id` so a task can't end up pointing at another project's sprint. List endpoints (`getProjectTasks`/`getMyTasks`) accept `?sprint_id=<uuid>` or the keyword `?sprint_id=backlog` (there's no way to put a literal `NULL` in a query string) via the shared `buildTaskFilters` — the same filter helper also handles `?status=` and `?type=`, so a new filter is one branch added there rather than a new endpoint. `getProjectTasks` orders by `rank` (see "Board & Backlog rules" below); `getMyTasks` still orders by `created_at DESC` since it spans multiple projects, where one project's `rank` isn't a meaningful cross-project order.
+
+#### Task detail fields
+
+Each card `type` has its own extra fields beyond the common `title`/`description`, stored in the single `details` JSONB column rather than one column per field — `TASK_DETAIL_FIELDS` in `taskController.js` is the whitelist of allowed keys per type (currently `BUG`: `steps_to_reproduce`, `expected_behavior`, `actual_behavior`; `STORY`: `acceptance_criteria`; `EPIC`/`TASK`: none yet), and `normalizeDetails(type, details)` validates a submitted `details` object against it — unknown keys or non-string values are `400`s. Adding a field, or a field set for a currently-empty type, is a one-line change to that map, not a migration.
+
+`details` is **replaced wholesale**, not merged, on every write — same contract as `type`/`sprint_id` — so sending `{}` clears all fields. `createTask` validates it against the task's (possibly just-defaulted) type and defaults to `{}` when omitted. `updateTask` validates it against whatever type the task will have *after* this same request: if `type` is also being sent, that's the effective type with no extra query; otherwise the task's current `type` is looked up first (mirrors the existing "look up current `sprint_id` when `after_task_id` arrives alone" pattern in the same handler).
 
 ### Sprint rules
 

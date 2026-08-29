@@ -6,6 +6,15 @@ const pool = require('../db');
 const TASK_TYPES = ['EPIC', 'STORY', 'TASK', 'BUG'];
 const DEFAULT_TASK_TYPE = 'STORY';
 
+// Campos propios de `details` según el tipo de tarjeta. Único lugar a tocar
+// para agregar un campo o un tipo nuevo: no hace falta migración.
+const TASK_DETAIL_FIELDS = {
+  EPIC: [],
+  STORY: ['acceptance_criteria'],
+  TASK: [],
+  BUG: ['steps_to_reproduce', 'expected_behavior', 'actual_behavior']
+};
+
 const STATUS_MAP = {
   todo: 'TODO',
   in_progress: 'IN_PROGRESS',
@@ -30,6 +39,7 @@ const TASK_SELECT = `
     t.project_id,
     t.sprint_id,
     t.rank,
+    t.details,
     p.key AS project_key,
     p.name AS project_name,
     t.user_id,
@@ -49,13 +59,38 @@ const normalizeType = (type) => {
 
 const normalizeStatus = (status) => STATUS_MAP[String(status).toLowerCase()] || null;
 
+// Valida `details` contra la lista de campos permitidos para el tipo dado.
+// Reemplazo total (no merge parcial): mandar `{}` borra todos los campos.
+const normalizeDetails = (type, details) => {
+  if (details === null || typeof details !== 'object' || Array.isArray(details)) {
+    return { error: 'details must be an object' };
+  }
+
+  const allowedFields = TASK_DETAIL_FIELDS[type] || [];
+  const normalized = {};
+
+  for (const [key, value] of Object.entries(details)) {
+    if (!allowedFields.includes(key)) {
+      return { error: `"${key}" is not a valid detail field for type ${type}` };
+    }
+
+    if (value !== null && typeof value !== 'string') {
+      return { error: `"${key}" must be a string` };
+    }
+
+    normalized[key] = value === null ? null : value.trim();
+  }
+
+  return { value: normalized };
+};
+
 // ----------------------------
 // Crear tarea dentro de un proyecto
 // ----------------------------
 const createTask = async (req, res) => {
   const user_id = req.user.id;
   const project_id = req.project.id;      // lo dejó el middleware de acceso
-  const { title, description, type } = req.body || {};
+  const { title, description, type, details } = req.body || {};
 
   if (!title || typeof title !== 'string' || !title.trim()) {
     return res.status(400).json({ message: 'Title is required' });
@@ -68,6 +103,17 @@ const createTask = async (req, res) => {
     if (!typeNormalized) {
       return res.status(400).json({ message: 'Invalid type value' });
     }
+  }
+
+  let detailsNormalized = {};
+  if (details !== undefined) {
+    const { error: detailsError, value } = normalizeDetails(typeNormalized, details);
+
+    if (detailsError) {
+      return res.status(400).json({ message: detailsError });
+    }
+
+    detailsNormalized = value;
   }
 
   // El número de ticket sale de un contador por proyecto que se incrementa de
@@ -101,11 +147,11 @@ const createTask = async (req, res) => {
 
     const newTask = await client.query(
       `
-      INSERT INTO tasks (id, project_id, ticket_number, user_id, title, description, type, rank)
-      VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7)
+      INSERT INTO tasks (id, project_id, ticket_number, user_id, title, description, type, rank, details)
+      VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8)
       RETURNING *;
       `,
-      [project_id, ticket_number, user_id, title.trim(), description || null, typeNormalized, nextRank]
+      [project_id, ticket_number, user_id, title.trim(), description || null, typeNormalized, nextRank, detailsNormalized]
     );
 
     await client.query('COMMIT');
@@ -253,10 +299,14 @@ const updateTask = async (req, res) => {
   const { sprint_id } = body;
   const hasAfterTaskId = Object.prototype.hasOwnProperty.call(body, 'after_task_id');
   const { after_task_id } = body;
+  // Igual que sprint_id/after_task_id: hay que distinguir "no lo mandaron" de
+  // "lo mandaron en {}" (borrar todos los campos del tipo actual).
+  const hasDetails = Object.prototype.hasOwnProperty.call(body, 'details');
+  const { details } = body;
 
-  if (status === undefined && type === undefined && !hasSprintId && !hasAfterTaskId) {
+  if (status === undefined && type === undefined && !hasSprintId && !hasAfterTaskId && !hasDetails) {
     return res.status(400).json({
-      message: 'Nothing to update: send status, type, sprint_id and/or after_task_id'
+      message: 'Nothing to update: send status, type, sprint_id, details and/or after_task_id'
     });
   }
 
@@ -274,8 +324,11 @@ const updateTask = async (req, res) => {
     updates.push(`status = $${values.length}`);
   }
 
+  // Se guarda afuera del if: el bloque de 'details' de más abajo lo necesita
+  // para saber contra qué tipo validar cuando el tipo cambia en el mismo request.
+  let typeNormalized;
   if (type !== undefined) {
-    const typeNormalized = normalizeType(type);
+    typeNormalized = normalizeType(type);
 
     if (!typeNormalized) {
       return res.status(400).json({ message: 'Invalid type value' });
@@ -283,6 +336,41 @@ const updateTask = async (req, res) => {
 
     values.push(typeNormalized);
     updates.push(`type = $${values.length}`);
+  }
+
+  if (hasDetails) {
+    // Si el tipo no cambia en este mismo request, hay que leer el actual para
+    // saber contra qué lista de campos validar 'details'.
+    let effectiveType = typeNormalized;
+
+    if (!effectiveType) {
+      try {
+        const current = await pool.query(
+          `SELECT type FROM tasks WHERE id = $1 AND project_id = $2;`,
+          [id, project_id]
+        );
+
+        if (current.rows.length === 0) {
+          return res.status(404).json({ message: 'Task not found' });
+        }
+
+        effectiveType = current.rows[0].type;
+      } catch (error) {
+        if (error.code === '22P02') {
+          return res.status(404).json({ message: 'Task not found' });
+        }
+        throw error;
+      }
+    }
+
+    const { error: detailsError, value: detailsValue } = normalizeDetails(effectiveType, details);
+
+    if (detailsError) {
+      return res.status(400).json({ message: detailsError });
+    }
+
+    values.push(detailsValue);
+    updates.push(`details = $${values.length}`);
   }
 
   if (hasSprintId) {
