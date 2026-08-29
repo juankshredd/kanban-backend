@@ -17,6 +17,8 @@ Express + PostgreSQL REST API backend for a Kanban board app (`kanban-backend`).
 
 No lint script is configured.
 
+- Run the Postman/Newman API-level QA suite (requires the server running on port 5000): `npm run test:postman` — see `postman/README.md`. Regenerate the collection after changing an endpoint with `npm run postman:generate` (never hand-edit the generated JSON).
+
 ## Git workflow
 
 `dev` is branch-protected on GitHub ("Changes must be made through a pull request") and `master` presumably more so. **Never push or merge directly into `dev` or `master`** — do all work on a feature branch cut from `dev` (e.g. `feature/<name>`) and open a PR back into `dev` instead, even if a direct push would technically succeed for an admin account. If a push is rejected or bypasses the rule with a warning, treat that as a sign to stop and go through a PR rather than proceeding.
@@ -151,6 +153,10 @@ All three reuse `taskController.js`'s `TASK_SELECT` (exported for this reason) r
 `retroController.js` / `projectRetroRoutes.js`, mounted at `/api/projects/:projectId/sprints/:sprintId/retrospective`. Any project member can read the retro and add notes; editing or deleting a note is restricted to its author, except deletion which the project `OWNER` can also do (light moderation, e.g. removing an inappropriate note).
 
 `GET /` returns notes pre-grouped into `{ WENT_WELL: [...], TO_IMPROVE: [...], ACTION_ITEM: [...] }` rather than a flat list — that's the shape a retro board renders directly, three columns, no client-side grouping. Every handler re-derives `req.user.username` via `NOTE_SELECT`'s join to `users` for `author_name`, since the JWT payload only carries `{ id }`.
+
+## Postman / Newman (API-level QA suite)
+
+`postman/` holds a generated Postman collection (126 requests across 10 ordered folders) that exercises the whole API end-to-end against a real running server — complementary to the Jest suites above, which mock `src/db` and never hit Postgres. See `postman/README.md` for how it's organized, how to run it, and how to regenerate it after an endpoint changes. CI runs it with Newman on every push/PR, after the Jest step.
 
 ## Testing notes
 

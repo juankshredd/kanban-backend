@@ -56,6 +56,21 @@ jobs:
       - name: Run tests
         run: npx jest
 
+      # Newman corre contra un server real (no supertest in-process como Jest),
+      # así que necesita el server levantado y escuchando en el puerto 5000.
+      - name: Start server for Postman/Newman
+        run: nohup npm run dev > server.log 2>&1 &
+
+      - name: Wait for server to be ready
+        run: npx wait-on http://localhost:5000/test-db --timeout 30000
+
+      - name: Run Postman collection (Newman)
+        run: npm run test:postman
+
+      - name: Show server log on failure
+        if: failure()
+        run: cat server.log || true
+
       - name: Upload coverage
         if: always()
         uses: actions/upload-artifact@v4
