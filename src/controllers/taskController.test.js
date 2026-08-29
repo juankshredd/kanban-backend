@@ -384,9 +384,10 @@ describe('taskController.updateTaskType', () => {
     jest.clearAllMocks();
   });
 
-  it('200 + updated task when a valid type is sent', async () => {
+  it('200 + updated task when a valid type is sent (existing details are compatible)', async () => {
     const taskRow = { id: 'task-uuid', ticket_id: 'ACM-1', type: 'BUG' };
     pool.query
+      .mockResolvedValueOnce({ rows: [{ details: {} }] })     // existing-details compatibility check
       .mockResolvedValueOnce({ rows: [{ id: 'task-uuid' }] }) // UPDATE tasks
       .mockResolvedValueOnce({ rows: [taskRow] });            // re-read via TASK_SELECT
 
@@ -401,6 +402,26 @@ describe('taskController.updateTaskType', () => {
 
     expect(res.status).toHaveBeenCalledWith(200);
     expect(res.json).toHaveBeenCalledWith(taskRow);
+  });
+
+  it('400 when changing type would leave existing details incompatible', async () => {
+    // Tarea actualmente STORY con acceptance_criteria; pasarla a BUG dejaría
+    // ese campo huérfano (BUG no lo tiene en su whitelist).
+    pool.query.mockResolvedValueOnce({ rows: [{ details: { acceptance_criteria: 'Done when...' } }] });
+
+    const req = {
+      project: { id: 'project-uuid' },
+      params: { id: 'task-uuid' },
+      body: { type: 'bug' }
+    };
+    const res = mockRes();
+
+    await updateTaskType(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith({
+      message: expect.stringContaining('existing details are incompatible with the new type')
+    });
   });
 
   it('400 when req.body is undefined (regression: no Content-Type header)', async () => {

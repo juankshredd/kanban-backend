@@ -108,6 +108,8 @@ Each card `type` has its own extra fields beyond the common `title`/`description
 
 `details` is **replaced wholesale**, not merged, on every write — same contract as `type`/`sprint_id` — so sending `{}` clears all fields. `createTask` validates it against the task's (possibly just-defaulted) type and defaults to `{}` when omitted. `updateTask` validates it against whatever type the task will have *after* this same request: if `type` is also being sent, that's the effective type with no extra query; otherwise the task's current `type` is looked up first (mirrors the existing "look up current `sprint_id` when `after_task_id` arrives alone" pattern in the same handler).
 
+The reverse case is guarded too: if `type` changes but `details` is *not* sent in the same request (including via `PATCH /:id/type`, which forwards only `{ type }`), `updateTask` looks up the task's already-stored `details` and re-validates them against the new type, `400`ing rather than silently leaving now-invalid fields (e.g. a BUG's `steps_to_reproduce`) on a task that just became a STORY. Send `details` explicitly in the same request to change both at once.
+
 ### Sprint rules
 
 `sprintController.js` / `projectSprintRoutes.js`, mounted at `/api/projects/:projectId/sprints`. Any project member can create/start/complete/delete sprints — unlike project membership management, this isn't OWNER-gated.

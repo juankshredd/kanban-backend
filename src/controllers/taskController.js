@@ -338,6 +338,37 @@ const updateTask = async (req, res) => {
     updates.push(`type = $${values.length}`);
   }
 
+  // El tipo cambia pero 'details' no viene en este request: hay que chequear
+  // que los details ya guardados sigan siendo válidos para el tipo nuevo (si
+  // no, quedarían campos huérfanos de un tipo que la tarea ya no tiene). Pasa
+  // también cuando esto se llama desde updateTaskType, que reenvía solo
+  // { type }.
+  if (typeNormalized && !hasDetails) {
+    try {
+      const current = await pool.query(
+        `SELECT details FROM tasks WHERE id = $1 AND project_id = $2;`,
+        [id, project_id]
+      );
+
+      if (current.rows.length === 0) {
+        return res.status(404).json({ message: 'Task not found' });
+      }
+
+      const { error: detailsError } = normalizeDetails(typeNormalized, current.rows[0].details || {});
+
+      if (detailsError) {
+        return res.status(400).json({
+          message: `Cannot change type: existing details are incompatible with the new type (${detailsError}). Send details explicitly to update them.`
+        });
+      }
+    } catch (error) {
+      if (error.code === '22P02') {
+        return res.status(404).json({ message: 'Task not found' });
+      }
+      throw error;
+    }
+  }
+
   if (hasDetails) {
     // Si el tipo no cambia en este mismo request, hay que leer el actual para
     // saber contra qué lista de campos validar 'details'.
