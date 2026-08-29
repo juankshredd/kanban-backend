@@ -15,7 +15,7 @@ const {
   updateProjectMemberRole,
   removeProjectMember
 } = require('../controllers/projectController');
-const { getBoard, getBacklogView } = require('../controllers/boardController');
+const { getBoard, getBacklogView, getTaskHierarchy } = require('../controllers/boardController');
 
 // Se aplica una vez para todo el router (incluidos los routers anidados que se
 // monten más adelante bajo /:projectId) en lugar de repetirlo ruta por ruta.
@@ -32,6 +32,7 @@ router.delete('/:projectId', requireProjectOwner, deleteProject);
 // tareas / sprints futuros + tareas + Backlog, cada una en un solo request).
 router.get('/:projectId/board', requireProjectMember, getBoard);
 router.get('/:projectId/backlog', requireProjectMember, getBacklogView);
+router.get('/:projectId/hierarchy', requireProjectMember, getTaskHierarchy);
 
 router.post('/:projectId/members', requireProjectOwner, addProjectMember);
 router.patch('/:projectId/members/:userId', requireProjectOwner, updateProjectMemberRole);
