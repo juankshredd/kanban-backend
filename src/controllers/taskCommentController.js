@@ -1,4 +1,5 @@
 const pool = require('../db');
+const { findTaskInProject } = require('./taskRelationController');
 
 const COMMENT_SELECT = `
   SELECT
@@ -14,15 +15,6 @@ const COMMENT_SELECT = `
 
 // Sin edición (el mockup de la sección "Activity" no muestra affordance de
 // editar, solo de agregar) -- ver "Task comments" en CLAUDE.md.
-
-const findTaskInProject = async (id, projectId) => {
-  const result = await pool.query(
-    `SELECT id FROM tasks WHERE id = $1 AND project_id = $2;`,
-    [id, projectId]
-  );
-
-  return result.rows[0] || null;
-};
 
 // ----------------------------
 // Agregar comentario

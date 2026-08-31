@@ -261,6 +261,34 @@ describe('taskController.createTask', () => {
     expect(res.json).toHaveBeenCalledWith({ message: 'parent_id no longer exists' });
   });
 
+  it('409 blaming assignee_id (not parent_id) when its FK is the one violated mid-race', async () => {
+    pool.query.mockResolvedValueOnce({ rows: [{ user_id: 'member-uuid' }] }); // validateAssigneeId: still a member at this point
+
+    const fkError = new Error('insert or update on table "tasks" violates foreign key constraint');
+    fkError.code = '23503';
+    fkError.constraint = 'tasks_assignee_id_fkey';
+    const client = { query: jest.fn(), release: jest.fn() };
+    client.query
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce({ rows: [{ key: 'ACM', ticket_number: 9 }] })
+      .mockResolvedValueOnce({ rows: [{ next_rank: 5500 }] })
+      .mockRejectedValueOnce(fkError)                                     // INSERT: assignee_id was just removed
+      .mockResolvedValueOnce(undefined);
+    pool.connect.mockResolvedValue(client);
+
+    const req = {
+      user: { id: 'user-uuid' },
+      project: { id: 'project-uuid' },
+      body: { title: 'Design login', assignee_id: 'member-uuid' }
+    };
+    const res = mockRes();
+
+    await createTask(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(res.json).toHaveBeenCalledWith({ message: 'assignee_id no longer exists' });
+  });
+
   it('201 + task with assignee_id, points and labels', async () => {
     const taskRow = {
       id: 'task-uuid', project_id: 'project-uuid', ticket_number: 10, user_id: 'user-uuid',
@@ -323,6 +351,25 @@ describe('taskController.createTask', () => {
 
     expect(res.status).toHaveBeenCalledWith(400);
     expect(res.json).toHaveBeenCalledWith({ message: 'points must be a non-negative integer' });
+    expect(pool.connect).not.toHaveBeenCalled();
+  });
+
+  it('400 when points is a non-number that would coerce to a valid integer (regression: true/""/[5])', async () => {
+    // Number(true) === 1, Number('') === 0, Number([5]) === 5 -- all would
+    // pass Number.isInteger if points weren't type-checked first.
+    for (const badPoints of [true, '', [5]]) {
+      const req = {
+        user: { id: 'user-uuid' },
+        project: { id: 'project-uuid' },
+        body: { title: 'Design login', points: badPoints }
+      };
+      const res = mockRes();
+
+      await createTask(req, res);
+
+      expect(res.status).toHaveBeenCalledWith(400);
+      expect(res.json).toHaveBeenCalledWith({ message: 'points must be a non-negative integer' });
+    }
     expect(pool.connect).not.toHaveBeenCalled();
   });
 
@@ -708,6 +755,28 @@ describe('taskController.updateTask', () => {
 
     expect(res.status).toHaveBeenCalledWith(409);
     expect(res.json).toHaveBeenCalledWith({ message: 'parent_id no longer exists' });
+  });
+
+  it('409 blaming assignee_id (not parent_id) when its FK is the one violated mid-race', async () => {
+    const fkError = new Error('update on table "tasks" violates foreign key constraint');
+    fkError.code = '23503';
+    fkError.constraint = 'tasks_assignee_id_fkey';
+    pool.query
+      .mockResolvedValueOnce({ rows: [{ user_id: 'member-uuid' }] }) // validateAssigneeId: still a member at this point
+      .mockRejectedValueOnce(fkError);                               // UPDATE: assignee_id was just removed
+
+    const req = {
+      user: { id: 'user-uuid' },
+      project: { id: 'project-uuid' },
+      params: { id: 'task-uuid' },
+      body: { assignee_id: 'member-uuid' }
+    };
+    const res = mockRes();
+
+    await updateTask(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(res.json).toHaveBeenCalledWith({ message: 'assignee_id no longer exists' });
   });
 
   it('400 when details has a key invalid for the effective type', async () => {

@@ -264,5 +264,8 @@ module.exports = {
   getRelations,
   deleteRelation,
   // Reusado por boardController.js para el endpoint agregado de detalle.
-  fetchRelationsForTask
+  fetchRelationsForTask,
+  // Reusado por taskCommentController.js: mismo chequeo de "esta tarea es de
+  // este proyecto" que necesita cualquier recurso anidado bajo /tasks/:id.
+  findTaskInProject
 };
