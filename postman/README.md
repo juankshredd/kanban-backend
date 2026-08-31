@@ -6,7 +6,7 @@ desde Newman (headless, en CI).
 
 ## Qué cubre
 
-**126 requests** organizados en 10 carpetas que corren en orden (01 → 10) y
+**135 requests** organizados en 10 carpetas que corren en orden (01 → 10) y
 encadenan variables de entorno entre sí (tokens, ids de company/project/task/
 sprint/note). Cobertura: cada función exportada de los controladores (ver la
 sección "Architecture" del `CLAUDE.md` raíz) tiene al menos 1 request

@@ -146,11 +146,70 @@ const tasksFolder = folder('04 - Tasks', [
     body: { status: 'done' },
     tests: lines(status(404), messageIsString()),
   }),
+  request('Create Relation "related to" (canonical route)', 'POST', '{{baseUrl}}/projects/{{projectId}}/tasks/{{task1Id}}/relations', {
+    auth: asUserA,
+    description: 'Relación simétrica y sin restricción de tipo, distinta de la jerarquía parent_id.',
+    body: { related_task_id: '{{task2Id}}' },
+    tests: lines(
+      status(201),
+      bodyVar,
+      "pm.test('Relation links task1 and task2', function () {",
+      "  pm.expect(body.task_id).to.eql(pm.environment.get('task1Id'));",
+      "  pm.expect(body.related_task_id).to.eql(pm.environment.get('task2Id'));",
+      '});'
+    ),
+  }),
+  request('Create Relation - Self Relation (negative)', 'POST', '{{baseUrl}}/projects/{{projectId}}/tasks/{{task1Id}}/relations', {
+    auth: asUserA,
+    body: { related_task_id: '{{task1Id}}' },
+    tests: lines(status(400), messageIsString()),
+  }),
+  request('Create Relation - Already Related (negative)', 'POST', '{{baseUrl}}/projects/{{projectId}}/tasks/{{task1Id}}/relations', {
+    auth: asUserA,
+    description: 'task1/task2 ya están relacionadas por el request anterior; el índice único del par vuelve esto 409.',
+    body: { related_task_id: '{{task2Id}}' },
+    tests: lines(status(409), messageIsString()),
+  }),
+  request('Create Relation - Reverse Pair Also Conflicts (negative)', 'POST', '{{baseUrl}}/projects/{{projectId}}/tasks/{{task2Id}}/relations', {
+    auth: asUserA,
+    description: 'Mismo par en el orden inverso: la relación es simétrica, así que también es 409.',
+    body: { related_task_id: '{{task1Id}}' },
+    tests: lines(status(409), messageIsString()),
+  }),
+  request('Create Relation - Task Not Found (negative)', 'POST', '{{baseUrl}}/projects/{{projectId}}/tasks/{{task1Id}}/relations', {
+    auth: asUserA,
+    body: { related_task_id: '00000000-0000-0000-0000-000000000000' },
+    tests: lines(status(404), messageIsString()),
+  }),
+  request('List Relations For task1', 'GET', '{{baseUrl}}/projects/{{projectId}}/tasks/{{task1Id}}/relations', {
+    auth: asUserA,
+    tests: lines(
+      status(200),
+      bodyVar,
+      "pm.test('Includes task2 as a related task', function () {",
+      "  pm.expect(body.some((r) => r.task.id === pm.environment.get('task2Id'))).to.be.true;",
+      '});'
+    ),
+  }),
+  request('Delete Relation (cross-project route)', 'DELETE', '{{baseUrl}}/tasks/{{task1Id}}/relations/{{task2Id}}', {
+    auth: asUserA,
+    description: 'Ejercita la ruta transversal /api/tasks/:id/relations/:relatedTaskId, resuelta vía requireProjectMemberForResource.',
+    tests: lines(status(200), bodyVar, "pm.expect(body.message).to.eql('Relation removed successfully');"),
+  }),
+  request('List Relations For task1 - Empty After Delete', 'GET', '{{baseUrl}}/projects/{{projectId}}/tasks/{{task1Id}}/relations', {
+    auth: asUserA,
+    tests: lines(status(200), bodyVar, "pm.expect(body).to.eql([]);"),
+  }),
+  request('Delete Relation - Not Found (negative)', 'DELETE', '{{baseUrl}}/tasks/{{task1Id}}/relations/{{task2Id}}', {
+    auth: asUserA,
+    description: 'Ya se borró en el request anterior.',
+    tests: lines(status(404), messageIsString()),
+  }),
   request('Delete Task - Not TODO (negative)', 'DELETE', '{{baseUrl}}/projects/{{projectId}}/tasks/{{task1Id}}', {
     auth: asUserA,
     description: 'task1 está en IN_PROGRESS: solo se puede borrar en TODO.',
     tests: lines(status(400), messageIsString()),
   }),
-], { description: 'CRUD de tasks (rutas canónica y transversal), filtros, tipos, reorder por rank y la regla "solo se borra en TODO". Deja task1/2/3Id listos para Sprints.' });
+], { description: 'CRUD de tasks (rutas canónica y transversal), filtros, tipos, reorder por rank, relaciones "related to" y la regla "solo se borra en TODO". Deja task1/2/3Id listos para Sprints.' });
 
 module.exports = tasksFolder;
