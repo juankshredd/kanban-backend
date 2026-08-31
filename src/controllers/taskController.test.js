@@ -779,6 +779,28 @@ describe('taskController.updateTask', () => {
     expect(res.json).toHaveBeenCalledWith({ message: 'assignee_id no longer exists' });
   });
 
+  it('409 blaming sprint_id (not parent_id) when the sprint is deleted between the pre-check and the UPDATE', async () => {
+    const fkError = new Error('update on table "tasks" violates foreign key constraint');
+    fkError.code = '23503';
+    fkError.constraint = 'tasks_sprint_id_fkey';
+    pool.query
+      .mockResolvedValueOnce({ rows: [{ id: 'sprint-uuid' }] }) // sprint_id ownership check: still valid at this point
+      .mockRejectedValueOnce(fkError);                          // UPDATE: sprint was just deleted
+
+    const req = {
+      user: { id: 'user-uuid' },
+      project: { id: 'project-uuid' },
+      params: { id: 'task-uuid' },
+      body: { sprint_id: 'sprint-uuid' }
+    };
+    const res = mockRes();
+
+    await updateTask(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(res.json).toHaveBeenCalledWith({ message: 'sprint_id no longer exists' });
+  });
+
   it('400 when details has a key invalid for the effective type', async () => {
     pool.query.mockResolvedValueOnce({ rows: [{ type: 'STORY' }] }); // current-type lookup
 
