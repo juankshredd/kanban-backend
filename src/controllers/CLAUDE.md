@@ -2,7 +2,7 @@
 
 Loaded automatically (per Claude Code's nested-memory-file mechanism) whenever Claude reads files in this directory — see the root `CLAUDE.md` for project-wide context (commands, git workflow, overall architecture, testing/CI conventions) that isn't repeated here. For migration mechanics (numbering, transactional apply), see `migrations/CLAUDE.md`.
 
-### Data model
+## Data model
 
 - `users` table: `id`, `username`, `email`, `password_hash` (bcrypt-hashed), `is_active` (boolean, used for soft deactivate/reactivate).
 - `tasks` table: `id` (uuid, `gen_random_uuid()`), `user_id` (FK to users — the *reporter*, i.e. who created it), `title`, `description`, `status` (Postgres ENUM: `TODO`, `IN_PROGRESS`, `DONE`), `type` (Postgres ENUM: `EPIC`, `FEATURE`, `STORY`, `TASK`, `BUG`, defaults to `STORY`), `project_id` (FK to projects), `ticket_number` (int), `rank` (`numeric`, `NOT NULL` — manual Board/Backlog ordering, one global sequence per project; see "Board & Backlog rules"), `details` (`jsonb`, `NOT NULL DEFAULT '{}'` — type-specific fields, see "Task detail fields" below), `parent_id` (nullable FK to `tasks`, `ON DELETE RESTRICT` by default — the EPIC/FEATURE/STORY/TASK containment chain, see "Task hierarchy" below), `assignee_id` (nullable FK to users, migration `019_task_detail_panel_fields.sql` — separate from `user_id`/reporter), `points` (nullable integer), `labels` (`text[]`, `NOT NULL DEFAULT '{}'` — free-text per task, no shared catalog), `updated_by` (nullable FK to users — who made the last `PATCH`), `created_at`, `updated_at`.
@@ -17,11 +17,11 @@ Loaded automatically (per Claude Code's nested-memory-file mechanism) whenever C
 
 **Ticket IDs** (`KAN-42`) are *derived*, not stored: `project.key || '-' || task.ticket_number`. `ticket_number` must be assigned atomically via `UPDATE projects SET next_ticket_number = next_ticket_number + 1 ... RETURNING next_ticket_number - 1`, never via `MAX(ticket_number)+1` (races between concurrent users).
 
-### Auth flow
+## Auth flow
 
 Registration hashes passwords with bcrypt and rejects duplicate emails. Login checks `is_active = true`, verifies the bcrypt hash, and issues a JWT (`{ id: user.id }`, 1h expiry) signed with `JWT_SECRET`. There is commented-out (unimplemented) logic in `authController.js` for rate-limiting failed login attempts — not currently enforced.
 
-### Company rules
+## Company rules
 
 Companies are the container above projects. `companyController.js` / `companyRoutes.js`, mounted at `/api/companies`. `POST /api/companies` creates the company and its creator's `OWNER` membership in a single transaction, same reasoning as projects — a company without an owner would be unreachable. There's no `key`/ticket-prefix concept at this level.
 
@@ -36,13 +36,13 @@ Either way the handler reads `req.company.id` (set by whichever company middlewa
 
 The `devTest` company that migration `011` created owns every project that existed before this feature shipped — see "Data model" above.
 
-### Project rules
+## Project rules
 
 Projects are the container for the board, backlog, sprints and retrospectives. `POST /api/projects` creates the project and its creator's `OWNER` membership in a single transaction — a project without an owner would be unreachable even to its creator. If `key` is omitted it is derived from the name (`"Mi Tablero"` → `MIT`, then `MIT2`…); if supplied it is upper-cased and must match `^[A-Z][A-Z0-9]{1,9}$`.
 
 A project's `key` is deliberately **not** editable via `PATCH` — it is the prefix of every ticket id already handed out. Deleting a project cascades to its tasks and members, so it returns `409` when the project still has tasks unless `?force=true` is passed. The last `OWNER` of a project can be neither demoted nor removed.
 
-### Task rules
+## Task rules
 
 Tasks are authorized by **project membership**, not by `tasks.user_id` (which is now just who created it). Any member of a project can read and mutate its tasks. There are two route families, both served by the same `taskController.js` handlers:
 
@@ -55,7 +55,7 @@ Handlers read the project from `req.project.id` and scope every query with `WHER
 
 List endpoints (`getProjectTasks`/`getMyTasks`) accept `?sprint_id=<uuid>` or the keyword `?sprint_id=backlog` (there's no way to put a literal `NULL` in a query string) via the shared `buildTaskFilters` — the same filter helper also handles `?status=`, `?type=`, `?parent_id=` and `?search=` (case-insensitive `ILIKE` over `title` OR the derived ticket key, for the "Add related card" search panel), so a new filter is one branch added there rather than a new endpoint. `getProjectTasks` orders by `rank` (see "Board & Backlog rules" below); `getMyTasks` still orders by `created_at DESC` since it spans multiple projects, where one project's `rank` isn't a meaningful cross-project order.
 
-#### Task detail fields
+### Task detail fields
 
 Each card `type` has its own extra fields beyond the common `title`/`description`, stored in the single `details` JSONB column rather than one column per field — `TASK_DETAIL_FIELDS` in `taskController.js` is the whitelist of allowed keys per type (currently `BUG`: `steps_to_reproduce`, `expected_behavior`, `actual_behavior`; `STORY`: `acceptance_criteria`; `EPIC`/`TASK`: none yet), and `normalizeDetails(type, details)` validates a submitted `details` object against it — unknown keys or non-string values are `400`s. Adding a field, or a field set for a currently-empty type, is a one-line change to that map, not a migration.
 
@@ -65,7 +65,7 @@ The reverse case is guarded too: if `type` changes but `details` is *not* sent i
 
 `updateTask` consolidates every one of these "look up the current value of a field this request doesn't touch" cases (current `details`, current `parent_id`, current `type`, current `sprint_id`) into a single `SELECT type, details, parent_id, sprint_id FROM tasks WHERE id = $1 AND project_id = $2`, fetched at most once per request behind one `needsCurrentRow` check, rather than a separate query per field — this is deliberate: the field list only grows over time, and one round trip regardless of how many optional fields combine in a request is the difference between a board reorder-plus-edit staying cheap or not.
 
-#### Task hierarchy
+### Task hierarchy
 
 Cards form a fixed, four-level containment chain — `EPIC` → `FEATURE` → `STORY` → `TASK`/`BUG` — via a single nullable self-referencing `tasks.parent_id`. `TASK_PARENT_TYPE` in `taskController.js` maps each type to the *one* type its parent must be (`EPIC: null`, `FEATURE: 'EPIC'`, `STORY: 'FEATURE'`, `TASK`/`BUG: 'STORY'`); `validateParentId(parentId, childType, projectId)` is the single async helper enforcing it (parent must exist in the same project and have the required type), reused by `createTask` and both directions of `updateTask` (setting a new `parent_id`, and re-validating an *existing* `parent_id` when only `type` changes — the parent-side mirror of the `details` safeguard above). Because the chain has a fixed depth with exactly one legal parent type per child type, a cycle is structurally impossible without needing an ancestor walk to check for one.
 
@@ -73,7 +73,7 @@ Deleting a task with children is blocked: `parent_id`'s FK has no `ON DELETE` ac
 
 `GET /api/projects/:projectId/hierarchy` (`boardController.getTaskHierarchy`) returns the whole project's tree in one request — one `SELECT` of every task in the project (reusing `TASK_SELECT`) followed by an O(n) two-pass in-memory grouping by `parent_id` (no recursion: build a wrapper-with-`children` object per task first, then push each into its parent's `children` array by reference), returned as `{ roots: [...] }`. "Root" means *any* task with `parent_id IS NULL`, not only `EPIC`s — `parent_id` is optional for every type (a `STORY` can exist before it's attached to a `FEATURE`), so filtering roots to `type === 'EPIC'` would silently drop such tasks from the one endpoint whose job is showing the complete tree. Exists so a frontend rendering a full Epic→Feature→Story→Task view does it in one round trip instead of one request per node.
 
-#### Task relations
+### Task relations
 
 Beyond the `parent_id` hierarchy, tasks can also be linked with a second, unrelated kind of relation, of several **types**: `RELATED_TO` (symmetric, A↔B, no direction), and `BLOCKS`/`DUPLICATES`/`CLONES` (directional — one task points at another). Untyped-by-card-type (any type can link to any other) and multivalued (a task can have any number of links, including more than one type against the same other task). That shape doesn't fit as a column on `tasks`; it's modeled by its own N:M table, `task_relations`, and its own controller, `taskRelationController.js` (a separate file from `taskController.js`, same precedent as `retroController.js` living apart from `sprintController.js`).
 
@@ -85,11 +85,11 @@ Beyond the `parent_id` hierarchy, tasks can also be linked with a second, unrela
 - The link-type picker in the frontend's ticket modal also offers `"is child of"` — that one is **not** a `task_relations` row at all, it's the same search UI reused to set `parent_id` (`PATCH /api/tasks/:id { parent_id }`, already covered by "Task hierarchy" above).
 - `findTaskInProject` (in `taskRelationController.js`, exported and reused by `taskCommentController.js`) is the shared "does this task belong to this project" existence check for anything nested one level under `/tasks/:id`.
 
-#### Task comments
+### Task comments
 
 `taskCommentController.js`, mounted the same way as relations (`/api/projects/:projectId/tasks/:id/comments` and `/api/tasks/:id/comments`). The "Activity" feed on a task — same access pattern as `retrospective_notes`: any project member can read and add; deleting is restricted to the comment's author or the project `OWNER` (light moderation, same as retro notes). **No editing** — nothing in the product surface calls for it yet, so it isn't built. `@mentions` inside `content` are stored as plain text; highlighting them is a frontend rendering concern (regex over `@username`), not something this API parses, validates, or notifies on.
 
-### Sprint rules
+## Sprint rules
 
 `sprintController.js` / `projectSprintRoutes.js`, mounted at `/api/projects/:projectId/sprints`. Any project member can create/start/complete/delete sprints — unlike project membership management, this isn't OWNER-gated.
 
@@ -101,7 +101,7 @@ Beyond the `parent_id` hierarchy, tasks can also be linked with a second, unrela
 - `DELETE /:sprintId` only allowed while still `PLANNED` — deleting an `ACTIVE`/`COMPLETED` sprint would silently scatter its tasks to the Backlog via `ON DELETE SET NULL`; `completeSprint` is the explicit, auditable way to do that instead.
 - `GET /active` is the "Current Sprint" lookup a board view polls; `404` when none is active.
 
-### Board & Backlog rules
+## Board & Backlog rules
 
 `tasks.rank` (numeric, migration `013_task_rank.sql`) is **one global ordering sequence per project**, not one per sprint — this mirrors Jira's own model (a single ranked list; the Board and each Backlog section are just that list filtered by `sprint_id`), so relative order is automatically correct in any filtered view without maintaining a separate sequence per sprint/Backlog. `numeric`, not `float`: inserting between two neighbors via `(a + b) / 2` never loses precision even after many reorders, so there's no rebalance job. New tasks (`createTask`) always append to the end of the project's sequence (bottom of the Backlog, since new tasks have no `sprint_id` yet).
 
@@ -118,7 +118,7 @@ An optional `reorder_scope: 'siblings'` switches the destination list to **child
 
 All four reuse `taskController.js`'s `TASK_SELECT` (exported for this reason) rather than redefining the task projection — the first SQL fragment shared across controller files; every other `*_SELECT` (`SPRINT_SELECT`, `NOTE_SELECT`, `COMMENT_SELECT`) is still private to its own controller.
 
-### Retrospective rules
+## Retrospective rules
 
 `retroController.js` / `projectRetroRoutes.js`, mounted at `/api/projects/:projectId/sprints/:sprintId/retrospective`. Any project member can read the retro and add notes; editing or deleting a note is restricted to its author, except deletion which the project `OWNER` can also do (light moderation, e.g. removing an inappropriate note).
 
