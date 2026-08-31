@@ -61,6 +61,7 @@ Schema changes live in `migrations/*.sql`, applied in filename order by `scripts
 - `project_members` table: `(project_id, user_id)` unique, `role` (Postgres ENUM: `OWNER`, `MEMBER`). Projects are multi-user by design; membership — not `tasks.user_id` — is the intended authorization boundary going forward.
 - `sprints` table: `id`, `project_id` (FK), `name`, `goal`, `status` (Postgres ENUM: `PLANNED`, `ACTIVE`, `COMPLETED`), `start_date`, `end_date`, timestamps. A partial unique index (`one_active_sprint_per_project`) enforces at most one `ACTIVE` sprint per project — `startSprint` relies on this to turn a race into a `409` rather than checking-then-writing. `tasks.sprint_id` (nullable FK, `ON DELETE SET NULL`) is the Backlog/Sprint split: `NULL` means Backlog.
 - `retrospective_notes` table: `id`, `sprint_id` (FK, `ON DELETE CASCADE` — unlike tasks, a note has no identity outside its sprint), `author_id` (FK to users), `category` (Postgres ENUM: `WENT_WELL`, `TO_IMPROVE`, `ACTION_ITEM`), `content`, timestamps.
+- `task_relations` table (migration `017_task_relations.sql`): `id`, `task_id` / `related_task_id` (both FK to `tasks`, `ON DELETE CASCADE`), `created_by` (FK to users), `created_at`. A symmetric, untyped N:M "related to" link between any two tasks in the same project — distinct from the `parent_id` hierarchy, see "Task relations" below.
 
 **Ticket IDs** (`KAN-42`) are *derived*, not stored: `project.key || '-' || task.ticket_number`. `ticket_number` must be assigned atomically via `UPDATE projects SET next_ticket_number = next_ticket_number + 1 ... RETURNING next_ticket_number - 1`, never via `MAX(ticket_number)+1` (races between concurrent users).
 
@@ -122,6 +123,16 @@ Deleting a task with children is blocked: `parent_id`'s FK has no `ON DELETE` ac
 
 `GET /api/projects/:projectId/hierarchy` (`boardController.getTaskHierarchy`) returns the whole project's tree in one request — one `SELECT` of every task in the project (reusing `TASK_SELECT`) followed by an O(n) two-pass in-memory grouping by `parent_id` (no recursion: build a wrapper-with-`children` object per task first, then push each into its parent's `children` array by reference), returned as `{ roots: [...] }`. "Root" means *any* task with `parent_id IS NULL`, not only `EPIC`s — `parent_id` is optional for every type (a `STORY` can exist before it's attached to a `FEATURE`), so filtering roots to `type === 'EPIC'` would silently drop such tasks from the one endpoint whose job is showing the complete tree. Exists so a frontend rendering a full Epic→Feature→Story→Task view does it in one round trip instead of one request per node.
 
+#### Task relations
+
+Beyond the `parent_id` hierarchy, tasks can also be linked with a second, unrelated kind of relation: **"related to"** — symmetric (A↔B, no direction), untyped (any card type can relate to any other) and multivalued (a task can relate to any number of others). That shape doesn't fit as a column on `tasks`; it's modeled by its own N:M table, `task_relations`, and its own controller, `taskRelationController.js` (a separate file from `taskController.js`, same precedent as `retroController.js` living apart from `sprintController.js`).
+
+- `POST /api/projects/:projectId/tasks/:id/relations` (canonical) or `POST /api/tasks/:id/relations` (cross-project, via `requireProjectMemberForResource('tasks')`) — body `{ related_task_id }`. A single `id = ANY($1)` query confirms both tasks belong to the same project (`404` if not); `related_task_id === id` is rejected with `400` before touching the DB.
+- Symmetry is enforced by a **unique index on the unordered pair** — `(LEAST(task_id, related_task_id), GREATEST(...))` in migration `017_task_relations.sql` — rather than an app-level check-then-insert, same race-into-`409` trick as `one_active_sprint_per_project`: inserting the same pair in either order hits `23505` → `409 'Tasks are already related'`. A `23503` (the other task deleted between the check and the insert) is the same kind of race `parent_id no longer exists` handles for the hierarchy.
+- `GET .../:id/relations` resolves "the other task" from whichever side of the stored pair matches `:id` via a `CASE`, then re-projects those ids through `TASK_SELECT` — two queries plus a merge in JS, same pattern as `getBacklogView` — returning `[{ relation_id, related_since, task: {...} }]`.
+- `DELETE .../:id/relations/:relatedTaskId` matches the pair in either stored order.
+- Unlike `parent_id` (`ON DELETE RESTRICT`, since a parent with children can't just vanish), `task_relations`' FKs are `ON DELETE CASCADE` — a "related to" link is a loose reference, not containment, so deleting either task simply drops the link instead of blocking the delete.
+
 ### Sprint rules
 
 `sprintController.js` / `projectSprintRoutes.js`, mounted at `/api/projects/:projectId/sprints`. Any project member can create/start/complete/delete sprints — unlike project membership management, this isn't OWNER-gated.
@@ -156,7 +167,7 @@ All three reuse `taskController.js`'s `TASK_SELECT` (exported for this reason) r
 
 ## Postman / Newman (API-level QA suite)
 
-`postman/` holds a generated Postman collection (126 requests across 10 ordered folders) that exercises the whole API end-to-end against a real running server — complementary to the Jest suites above, which mock `src/db` and never hit Postgres. See `postman/README.md` for how it's organized, how to run it, and how to regenerate it after an endpoint changes. CI runs it with Newman on every push/PR, after the Jest step.
+`postman/` holds a generated Postman collection (135 requests across 10 ordered folders) that exercises the whole API end-to-end against a real running server — complementary to the Jest suites above, which mock `src/db` and never hit Postgres. See `postman/README.md` for how it's organized, how to run it, and how to regenerate it after an endpoint changes. CI runs it with Newman on every push/PR, after the Jest step.
 
 ## Testing notes
 

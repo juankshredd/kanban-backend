@@ -3317,6 +3317,369 @@
           ]
         },
         {
+          "name": "Create Relation \"related to\" (canonical route)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/projects/{{projectId}}/tasks/{{task1Id}}/relations",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{userAToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"related_task_id\": \"{{task2Id}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Relación simétrica y sin restricción de tipo, distinta de la jerarquía parent_id."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 201', function () { pm.response.to.have.status(201); });",
+                  "const body = pm.response.json();",
+                  "pm.test('Relation links task1 and task2', function () {",
+                  "  pm.expect(body.task_id).to.eql(pm.environment.get('task1Id'));",
+                  "  pm.expect(body.related_task_id).to.eql(pm.environment.get('task2Id'));",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create Relation - Self Relation (negative)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/projects/{{projectId}}/tasks/{{task1Id}}/relations",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{userAToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"related_task_id\": \"{{task1Id}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 400', function () { pm.response.to.have.status(400); });",
+                  "pm.test('Error response has a message string', function () { const body = pm.response.json(); pm.expect(body).to.have.property('message'); pm.expect(typeof body.message).to.eql('string'); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create Relation - Already Related (negative)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/projects/{{projectId}}/tasks/{{task1Id}}/relations",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{userAToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"related_task_id\": \"{{task2Id}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "task1/task2 ya están relacionadas por el request anterior; el índice único del par vuelve esto 409."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 409', function () { pm.response.to.have.status(409); });",
+                  "pm.test('Error response has a message string', function () { const body = pm.response.json(); pm.expect(body).to.have.property('message'); pm.expect(typeof body.message).to.eql('string'); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create Relation - Reverse Pair Also Conflicts (negative)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/projects/{{projectId}}/tasks/{{task2Id}}/relations",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{userAToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"related_task_id\": \"{{task1Id}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Mismo par en el orden inverso: la relación es simétrica, así que también es 409."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 409', function () { pm.response.to.have.status(409); });",
+                  "pm.test('Error response has a message string', function () { const body = pm.response.json(); pm.expect(body).to.have.property('message'); pm.expect(typeof body.message).to.eql('string'); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create Relation - Task Not Found (negative)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/projects/{{projectId}}/tasks/{{task1Id}}/relations",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{userAToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"related_task_id\": \"00000000-0000-0000-0000-000000000000\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 404', function () { pm.response.to.have.status(404); });",
+                  "pm.test('Error response has a message string', function () { const body = pm.response.json(); pm.expect(body).to.have.property('message'); pm.expect(typeof body.message).to.eql('string'); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List Relations For task1",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/projects/{{projectId}}/tasks/{{task1Id}}/relations",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{userAToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', function () { pm.response.to.have.status(200); });",
+                  "const body = pm.response.json();",
+                  "pm.test('Includes task2 as a related task', function () {",
+                  "  pm.expect(body.some((r) => r.task.id === pm.environment.get('task2Id'))).to.be.true;",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Delete Relation (cross-project route)",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": "{{baseUrl}}/tasks/{{task1Id}}/relations/{{task2Id}}",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{userAToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "Ejercita la ruta transversal /api/tasks/:id/relations/:relatedTaskId, resuelta vía requireProjectMemberForResource."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', function () { pm.response.to.have.status(200); });",
+                  "const body = pm.response.json();",
+                  "pm.expect(body.message).to.eql('Relation removed successfully');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List Relations For task1 - Empty After Delete",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/projects/{{projectId}}/tasks/{{task1Id}}/relations",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{userAToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', function () { pm.response.to.have.status(200); });",
+                  "const body = pm.response.json();",
+                  "pm.expect(body).to.eql([]);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Delete Relation - Not Found (negative)",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": "{{baseUrl}}/tasks/{{task1Id}}/relations/{{task2Id}}",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{userAToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "Ya se borró en el request anterior."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 404', function () { pm.response.to.have.status(404); });",
+                  "pm.test('Error response has a message string', function () { const body = pm.response.json(); pm.expect(body).to.have.property('message'); pm.expect(typeof body.message).to.eql('string'); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
           "name": "Delete Task - Not TODO (negative)",
           "request": {
             "method": "DELETE",
@@ -3349,7 +3712,7 @@
           ]
         }
       ],
-      "description": "CRUD de tasks (rutas canónica y transversal), filtros, tipos, reorder por rank y la regla \"solo se borra en TODO\". Deja task1/2/3Id listos para Sprints."
+      "description": "CRUD de tasks (rutas canónica y transversal), filtros, tipos, reorder por rank, relaciones \"related to\" y la regla \"solo se borra en TODO\". Deja task1/2/3Id listos para Sprints."
     },
     {
       "name": "05 - Sprints (part 1)",

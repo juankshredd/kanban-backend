@@ -8,6 +8,11 @@ const {
   updateTaskType,
   deleteTask
 } = require('../controllers/taskController');
+const {
+  createRelation,
+  getRelations,
+  deleteRelation
+} = require('../controllers/taskRelationController');
 
 // Rutas canónicas del board: /api/projects/:projectId/tasks
 //
@@ -19,5 +24,11 @@ router.get('/', getProjectTasks);
 router.patch('/:id', updateTask);
 router.patch('/:id/type', updateTaskType);
 router.delete('/:id', deleteTask);
+
+// Relaciones "related to" (simétricas, sin restricción de tipo, distintas de
+// la jerarquía parent_id) -- ver taskRelationController.js.
+router.post('/:id/relations', createRelation);
+router.get('/:id/relations', getRelations);
+router.delete('/:id/relations/:relatedTaskId', deleteRelation);
 
 module.exports = router;
