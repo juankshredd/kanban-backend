@@ -7,7 +7,8 @@ const pool = require('../db');
 const {
   createRelation,
   getRelations,
-  deleteRelation
+  deleteRelation,
+  fetchRelationsForTask
 } = require('./taskRelationController');
 
 const mockRes = () => {
@@ -236,6 +237,43 @@ describe('taskRelationController.createRelation', () => {
   });
 });
 
+describe('taskRelationController.fetchRelationsForTask', () => {
+  afterEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('resolves the related task and the forward label from the task_id side', async () => {
+    const relatedTask = { id: 'task-2', ticket_id: 'ACM-2', title: 'Related task' };
+
+    pool.query
+      .mockResolvedValueOnce({
+        rows: [{
+          relation_id: 'relation-uuid',
+          created_at: '2026-08-30T00:00:00.000Z',
+          relation_type: 'BLOCKS',
+          anchor_is_task_id: true,
+          related_task_id: 'task-2'
+        }]
+      })
+      .mockResolvedValueOnce({ rows: [relatedTask] });
+
+    const result = await fetchRelationsForTask('task-1', 'project-uuid');
+
+    expect(result).toEqual([
+      { relation_id: 'relation-uuid', related_since: '2026-08-30T00:00:00.000Z', type: 'blocks', task: relatedTask }
+    ]);
+  });
+
+  it('returns an empty array (and skips the second query) when there are no relations', async () => {
+    pool.query.mockResolvedValueOnce({ rows: [] });
+
+    const result = await fetchRelationsForTask('task-1', 'project-uuid');
+
+    expect(result).toEqual([]);
+    expect(pool.query).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('taskRelationController.getRelations', () => {
   afterEach(() => {
     jest.clearAllMocks();
@@ -412,6 +450,19 @@ describe('taskRelationController.deleteRelation', () => {
     pool.query.mockRejectedValueOnce({ code: '22P02' }); // findTaskInProject fails on the malformed :id
 
     const req = { project: { id: 'project-uuid' }, params: { id: 'not-a-uuid', relationId: 'relation-uuid' } };
+    const res = mockRes();
+
+    await deleteRelation(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(404);
+    expect(res.json).toHaveBeenCalledWith({ message: 'Task not found' });
+    expect(pool.query).toHaveBeenCalledTimes(1);
+  });
+
+  it('404 "Task not found" when the anchor task does not belong to the project', async () => {
+    pool.query.mockResolvedValueOnce({ rows: [] }); // findTaskInProject: valid uuid, just not found
+
+    const req = { project: { id: 'project-uuid' }, params: { id: 'task-1', relationId: 'relation-uuid' } };
     const res = mockRes();
 
     await deleteRelation(req, res);

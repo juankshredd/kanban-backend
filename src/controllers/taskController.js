@@ -165,13 +165,13 @@ const normalizePoints = (points) => {
     return { value: null };
   }
 
-  const numeric = Number(points);
-
-  if (!Number.isInteger(numeric) || numeric < 0) {
+  // typeof check primero: Number(true) === 1, Number('') === 0 y
+  // Number([5]) === 5 pasarían Number.isInteger sin ser realmente números.
+  if (typeof points !== 'number' || !Number.isInteger(points) || points < 0) {
     return { error: 'points must be a non-negative integer' };
   }
 
-  return { value: numeric };
+  return { value: points };
 };
 
 // Reemplazo total, no merge (mismo contrato que `details`): mandar `[]` borra
@@ -190,6 +190,17 @@ const normalizeLabels = (labels) => {
   }
 
   return { value: normalized };
+};
+
+// Nombre de la FK violada (23503) -> mensaje. Reusado por createTask y
+// updateTask: ambos pueden pisar una carrera en parent_id o assignee_id (la
+// tarea/usuario era válido al validarlo pero fue borrado antes de que el
+// INSERT/UPDATE corriera), y updateTask además puede pisarla en updated_by.
+// Sin esto, cualquier 23503 se le atribuía siempre a parent_id.
+const TASK_FK_MESSAGES = {
+  tasks_parent_id_fkey: 'parent_id no longer exists',
+  tasks_assignee_id_fkey: 'assignee_id no longer exists',
+  tasks_updated_by_fkey: 'Acting user no longer exists'
 };
 
 // ----------------------------
@@ -330,11 +341,12 @@ const createTask = async (req, res) => {
   } catch (error) {
     await client.query('ROLLBACK');
 
-    // parent_id existía en la validación previa pero fue borrado antes de que
-    // este INSERT corriera (carrera entre requests). Mismo código que
-    // deleteTask usa para "todavía hay algo apuntando a esto".
+    // parent_id o assignee_id existían en la validación previa pero fueron
+    // borrados antes de que este INSERT corriera (carrera entre requests).
+    // El nombre de la FK violada dice cuál.
     if (error.code === '23503') {
-      return res.status(409).json({ message: 'parent_id no longer exists' });
+      const message = TASK_FK_MESSAGES[error.constraint] || 'parent_id no longer exists';
+      return res.status(409).json({ message });
     }
 
     console.error("CREATE TASK ERROR:", error);
@@ -839,10 +851,12 @@ const updateTask = async (req, res) => {
       return res.status(404).json({ message: 'Task not found' });
     }
 
-    // Igual que en createTask: parent_id era válido al validarlo pero fue
-    // borrado antes de que este UPDATE corriera.
+    // Igual que en createTask: parent_id, assignee_id o (más raro)
+    // updated_by eran válidos al validarlos pero fueron borrados antes de que
+    // este UPDATE corriera. El nombre de la FK violada dice cuál.
     if (error.code === '23503') {
-      return res.status(409).json({ message: 'parent_id no longer exists' });
+      const message = TASK_FK_MESSAGES[error.constraint] || 'parent_id no longer exists';
+      return res.status(409).json({ message });
     }
 
     console.error("UPDATE TASK ERROR:", error);
