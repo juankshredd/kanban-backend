@@ -194,12 +194,15 @@ const normalizeLabels = (labels) => {
 
 // Nombre de la FK violada (23503) -> mensaje. Reusado por createTask y
 // updateTask: ambos pueden pisar una carrera en parent_id o assignee_id (la
-// tarea/usuario era válido al validarlo pero fue borrado antes de que el
-// INSERT/UPDATE corriera), y updateTask además puede pisarla en updated_by.
-// Sin esto, cualquier 23503 se le atribuía siempre a parent_id.
+// tarea/usuario/sprint era válido al validarlo pero fue borrado antes de que
+// el INSERT/UPDATE corriera); updateTask además puede pisarla en sprint_id
+// (el sprint se valida con un SELECT propio antes del UPDATE, no en la misma
+// transacción -- ver el bloque hasSprintId) y, en el caso límite, en
+// updated_by. Sin esto, cualquier 23503 se le atribuía siempre a parent_id.
 const TASK_FK_MESSAGES = {
   tasks_parent_id_fkey: 'parent_id no longer exists',
   tasks_assignee_id_fkey: 'assignee_id no longer exists',
+  tasks_sprint_id_fkey: 'sprint_id no longer exists',
   tasks_updated_by_fkey: 'Acting user no longer exists'
 };
 
