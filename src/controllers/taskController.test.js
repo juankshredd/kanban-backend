@@ -61,7 +61,7 @@ describe('taskController.createTask', () => {
     expect(client.query.mock.calls[2][0]).toEqual(expect.stringContaining('COALESCE(MAX(rank), 0) + 1000'));
     expect(client.query.mock.calls[3][0]).toEqual(expect.stringContaining('INSERT INTO tasks'));
     expect(client.query.mock.calls[3][1]).toEqual([
-      'project-uuid', 5, 'user-uuid', 'New Task', 'desc', 'STORY', 3000, {}, null
+      'project-uuid', 5, 'user-uuid', 'New Task', 'desc', 'STORY', 3000, {}, null, null, null, []
     ]);
     expect(res.status).toHaveBeenCalledWith(201);
     expect(res.json).toHaveBeenCalledWith({ ...taskRow, ticket_id: 'ACM-5', project_key: 'ACM' });
@@ -114,7 +114,7 @@ describe('taskController.createTask', () => {
     await createTask(req, res);
 
     expect(client.query.mock.calls[3][1]).toEqual([
-      'project-uuid', 6, 'user-uuid', 'Broken button', null, 'BUG', 4000, { steps_to_reproduce: 'Click it' }, null
+      'project-uuid', 6, 'user-uuid', 'Broken button', null, 'BUG', 4000, { steps_to_reproduce: 'Click it' }, null, null, null, []
     ]);
     expect(res.status).toHaveBeenCalledWith(201);
   });
@@ -179,7 +179,7 @@ describe('taskController.createTask', () => {
 
     expect(pool.query).toHaveBeenCalledWith(expect.any(String), ['feature-uuid', 'project-uuid']);
     expect(client.query.mock.calls[3][1]).toEqual([
-      'project-uuid', 7, 'user-uuid', 'Login story', null, 'STORY', 5000, {}, 'feature-uuid'
+      'project-uuid', 7, 'user-uuid', 'Login story', null, 'STORY', 5000, {}, 'feature-uuid', null, null, []
     ]);
     expect(res.status).toHaveBeenCalledWith(201);
   });
@@ -260,6 +260,86 @@ describe('taskController.createTask', () => {
     expect(res.status).toHaveBeenCalledWith(409);
     expect(res.json).toHaveBeenCalledWith({ message: 'parent_id no longer exists' });
   });
+
+  it('201 + task with assignee_id, points and labels', async () => {
+    const taskRow = {
+      id: 'task-uuid', project_id: 'project-uuid', ticket_number: 10, user_id: 'user-uuid',
+      title: 'Design login', type: 'STORY', rank: 8000, details: {}, parent_id: null,
+      assignee_id: 'member-uuid', points: 3, labels: ['ui']
+    };
+
+    pool.query.mockResolvedValueOnce({ rows: [{ user_id: 'member-uuid' }] }); // validateAssigneeId membership check
+
+    const client = { query: jest.fn(), release: jest.fn() };
+    client.query
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce({ rows: [{ key: 'ACM', ticket_number: 10 }] })
+      .mockResolvedValueOnce({ rows: [{ next_rank: 8000 }] })
+      .mockResolvedValueOnce({ rows: [taskRow] })
+      .mockResolvedValueOnce(undefined);
+    pool.connect.mockResolvedValue(client);
+
+    const req = {
+      user: { id: 'user-uuid' },
+      project: { id: 'project-uuid' },
+      body: { title: 'Design login', assignee_id: 'member-uuid', points: 3, labels: ['ui'] }
+    };
+    const res = mockRes();
+
+    await createTask(req, res);
+
+    expect(client.query.mock.calls[3][1]).toEqual([
+      'project-uuid', 10, 'user-uuid', 'Design login', null, 'STORY', 8000, {}, null, 'member-uuid', 3, ['ui']
+    ]);
+    expect(res.status).toHaveBeenCalledWith(201);
+  });
+
+  it('400 when assignee_id is not a member of the project', async () => {
+    pool.query.mockResolvedValueOnce({ rows: [] }); // not a project member
+
+    const req = {
+      user: { id: 'user-uuid' },
+      project: { id: 'project-uuid' },
+      body: { title: 'Design login', assignee_id: 'outsider-uuid' }
+    };
+    const res = mockRes();
+
+    await createTask(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith({ message: 'assignee_id must be a member of this project' });
+    expect(pool.connect).not.toHaveBeenCalled();
+  });
+
+  it('400 when points is not a non-negative integer', async () => {
+    const req = {
+      user: { id: 'user-uuid' },
+      project: { id: 'project-uuid' },
+      body: { title: 'Design login', points: -2 }
+    };
+    const res = mockRes();
+
+    await createTask(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith({ message: 'points must be a non-negative integer' });
+    expect(pool.connect).not.toHaveBeenCalled();
+  });
+
+  it('400 when a label is not a non-empty string', async () => {
+    const req = {
+      user: { id: 'user-uuid' },
+      project: { id: 'project-uuid' },
+      body: { title: 'Design login', labels: ['ui', ''] }
+    };
+    const res = mockRes();
+
+    await createTask(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith({ message: 'each label must be a non-empty string' });
+    expect(pool.connect).not.toHaveBeenCalled();
+  });
 });
 
 describe('taskController.getProjectTasks', () => {
@@ -304,6 +384,23 @@ describe('taskController.getProjectTasks', () => {
 
     expect(res.status).toHaveBeenCalledWith(400);
     expect(res.json).toHaveBeenCalledWith({ message: 'Invalid sprint_id or parent_id' });
+  });
+
+  it('200 + filters by search term across title and ticket key', async () => {
+    const rows = [{ id: 'task-uuid', ticket_id: 'ACM-1', title: 'Fix login' }];
+    pool.query.mockResolvedValue({ rows });
+
+    const req = { project: { id: 'project-uuid' }, query: { search: 'login' } };
+    const res = mockRes();
+
+    await getProjectTasks(req, res);
+
+    expect(pool.query).toHaveBeenCalledWith(
+      expect.stringContaining('ILIKE'),
+      ['project-uuid', '%login%', '%login%']
+    );
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(res.json).toHaveBeenCalledWith(rows);
   });
 });
 
@@ -353,6 +450,7 @@ describe('taskController.updateTask', () => {
       .mockResolvedValueOnce({ rows: [taskRow] });            // re-read via TASK_SELECT
 
     const req = {
+      user: { id: 'user-uuid' },
       project: { id: 'project-uuid' },
       params: { id: 'task-uuid' },
       body: { status: 'done' }
@@ -366,14 +464,14 @@ describe('taskController.updateTask', () => {
   });
 
   it('400 when neither status, type, sprint_id, details, parent_id nor after_task_id is sent', async () => {
-    const req = { project: { id: 'project-uuid' }, params: { id: 'task-uuid' }, body: {} };
+    const req = { user: { id: 'user-uuid' }, project: { id: 'project-uuid' }, params: { id: 'task-uuid' }, body: {} };
     const res = mockRes();
 
     await updateTask(req, res);
 
     expect(res.status).toHaveBeenCalledWith(400);
     expect(res.json).toHaveBeenCalledWith({
-      message: 'Nothing to update: send status, type, sprint_id, details, parent_id and/or after_task_id'
+      message: 'Nothing to update: send status, type, sprint_id, details, parent_id, assignee_id, points, labels and/or after_task_id'
     });
     expect(pool.query).not.toHaveBeenCalled();
   });
@@ -392,6 +490,7 @@ describe('taskController.updateTask', () => {
       .mockResolvedValueOnce({ rows: [taskRow] });                         // re-read via TASK_SELECT
 
     const req = {
+      user: { id: 'user-uuid' },
       project: { id: 'project-uuid' },
       params: { id: 'task-uuid' },
       body: { sprint_id: 'sprint-uuid', after_task_id: 'task-2' }
@@ -412,6 +511,7 @@ describe('taskController.updateTask', () => {
       .mockResolvedValueOnce({ rows: [{ id: 'task-2', rank: '1000' }] });   // destination list, no 'other-task'
 
     const req = {
+      user: { id: 'user-uuid' },
       project: { id: 'project-uuid' },
       params: { id: 'task-uuid' },
       body: { sprint_id: 'sprint-uuid', after_task_id: 'other-task' }
@@ -434,6 +534,7 @@ describe('taskController.updateTask', () => {
       .mockResolvedValueOnce({ rows: [taskRow] });             // re-read via TASK_SELECT
 
     const req = {
+      user: { id: 'user-uuid' },
       project: { id: 'project-uuid' },
       params: { id: 'task-uuid' },
       body: { details: { expected_behavior: '  Opens  ' } }
@@ -457,6 +558,7 @@ describe('taskController.updateTask', () => {
       .mockResolvedValueOnce({ rows: [taskRow] });                          // re-read via TASK_SELECT
 
     const req = {
+      user: { id: 'user-uuid' },
       project: { id: 'project-uuid' },
       params: { id: 'task-uuid' },
       body: { type: 'bug', details: { steps_to_reproduce: 'Click it' } }
@@ -482,6 +584,7 @@ describe('taskController.updateTask', () => {
       .mockResolvedValueOnce({ rows: [taskRow] });                 // re-read via TASK_SELECT
 
     const req = {
+      user: { id: 'user-uuid' },
       project: { id: 'project-uuid' },
       params: { id: 'task-uuid' },
       body: { details: { expected_behavior: 'Opens' }, parent_id: 'story-uuid' }
@@ -507,6 +610,7 @@ describe('taskController.updateTask', () => {
       .mockResolvedValueOnce({ rows: [taskRow] });                      // re-read via TASK_SELECT
 
     const req = {
+      user: { id: 'user-uuid' },
       project: { id: 'project-uuid' },
       params: { id: 'task-uuid' },
       body: { type: 'story', parent_id: 'feature-uuid' }
@@ -528,6 +632,7 @@ describe('taskController.updateTask', () => {
       .mockResolvedValueOnce({ rows: [taskRow] });            // re-read via TASK_SELECT
 
     const req = {
+      user: { id: 'user-uuid' },
       project: { id: 'project-uuid' },
       params: { id: 'task-uuid' },
       body: { parent_id: null }
@@ -548,6 +653,7 @@ describe('taskController.updateTask', () => {
       .mockResolvedValueOnce({ rows: [{ type: 'EPIC' }] });             // wrong type for a STORY's parent
 
     const req = {
+      user: { id: 'user-uuid' },
       project: { id: 'project-uuid' },
       params: { id: 'task-uuid' },
       body: { type: 'story', parent_id: 'epic-uuid' }
@@ -567,6 +673,7 @@ describe('taskController.updateTask', () => {
       .mockResolvedValueOnce({ rows: [{ type: 'EPIC' }] }); // re-check: parent's actual type
 
     const req = {
+      user: { id: 'user-uuid' },
       project: { id: 'project-uuid' },
       params: { id: 'task-uuid' },
       body: { type: 'task' }
@@ -590,6 +697,7 @@ describe('taskController.updateTask', () => {
       .mockRejectedValueOnce(fkError);                                 // UPDATE: parent_id was just deleted
 
     const req = {
+      user: { id: 'user-uuid' },
       project: { id: 'project-uuid' },
       params: { id: 'task-uuid' },
       body: { type: 'story', parent_id: 'feature-uuid' }
@@ -606,6 +714,7 @@ describe('taskController.updateTask', () => {
     pool.query.mockResolvedValueOnce({ rows: [{ type: 'STORY' }] }); // current-type lookup
 
     const req = {
+      user: { id: 'user-uuid' },
       project: { id: 'project-uuid' },
       params: { id: 'task-uuid' },
       body: { details: { steps_to_reproduce: 'Click it' } }
@@ -624,6 +733,7 @@ describe('taskController.updateTask', () => {
     pool.query.mockResolvedValueOnce({ rows: [] }); // current-type lookup, no match
 
     const req = {
+      user: { id: 'user-uuid' },
       project: { id: 'project-uuid' },
       params: { id: 'task-uuid' },
       body: { details: { acceptance_criteria: 'Done when...' } }
@@ -634,6 +744,189 @@ describe('taskController.updateTask', () => {
 
     expect(res.status).toHaveBeenCalledWith(404);
     expect(res.json).toHaveBeenCalledWith({ message: 'Task not found' });
+  });
+
+  it('200 sets assignee_id to a valid project member', async () => {
+    const taskRow = { id: 'task-uuid', ticket_id: 'ACM-1', assignee_id: 'member-uuid' };
+    pool.query
+      .mockResolvedValueOnce({ rows: [{ user_id: 'member-uuid' }] }) // validateAssigneeId membership check
+      .mockResolvedValueOnce({ rows: [{ id: 'task-uuid' }] })        // UPDATE tasks
+      .mockResolvedValueOnce({ rows: [taskRow] });                   // re-read via TASK_SELECT
+
+    const req = {
+      user: { id: 'user-uuid' },
+      project: { id: 'project-uuid' },
+      params: { id: 'task-uuid' },
+      body: { assignee_id: 'member-uuid' }
+    };
+    const res = mockRes();
+
+    await updateTask(req, res);
+
+    expect(pool.query.mock.calls[0][1]).toEqual(['member-uuid', 'project-uuid']);
+    expect(pool.query.mock.calls[1][0]).toEqual(expect.stringContaining('assignee_id = $'));
+    expect(pool.query.mock.calls[1][1]).toContain('member-uuid');
+    expect(pool.query.mock.calls[1][1]).toContain('user-uuid'); // updated_by = req.user.id
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(res.json).toHaveBeenCalledWith(taskRow);
+  });
+
+  it('400 when assignee_id is not a member of the project', async () => {
+    pool.query.mockResolvedValueOnce({ rows: [] }); // not a project member
+
+    const req = {
+      user: { id: 'user-uuid' },
+      project: { id: 'project-uuid' },
+      params: { id: 'task-uuid' },
+      body: { assignee_id: 'outsider-uuid' }
+    };
+    const res = mockRes();
+
+    await updateTask(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith({ message: 'assignee_id must be a member of this project' });
+  });
+
+  it('200 unassigns when assignee_id is sent as null (no membership lookup needed)', async () => {
+    const taskRow = { id: 'task-uuid', ticket_id: 'ACM-1', assignee_id: null };
+    pool.query
+      .mockResolvedValueOnce({ rows: [{ id: 'task-uuid' }] }) // UPDATE tasks
+      .mockResolvedValueOnce({ rows: [taskRow] });            // re-read via TASK_SELECT
+
+    const req = {
+      user: { id: 'user-uuid' },
+      project: { id: 'project-uuid' },
+      params: { id: 'task-uuid' },
+      body: { assignee_id: null }
+    };
+    const res = mockRes();
+
+    await updateTask(req, res);
+
+    expect(pool.query.mock.calls[0][0]).toEqual(expect.stringContaining('assignee_id = NULL'));
+    expect(res.status).toHaveBeenCalledWith(200);
+  });
+
+  it('200 sets points', async () => {
+    const taskRow = { id: 'task-uuid', ticket_id: 'ACM-1', points: 5 };
+    pool.query
+      .mockResolvedValueOnce({ rows: [{ id: 'task-uuid' }] })
+      .mockResolvedValueOnce({ rows: [taskRow] });
+
+    const req = {
+      user: { id: 'user-uuid' },
+      project: { id: 'project-uuid' },
+      params: { id: 'task-uuid' },
+      body: { points: 5 }
+    };
+    const res = mockRes();
+
+    await updateTask(req, res);
+
+    expect(pool.query.mock.calls[0][0]).toEqual(expect.stringContaining('points = $'));
+    expect(pool.query.mock.calls[0][1]).toContain(5);
+    expect(res.status).toHaveBeenCalledWith(200);
+  });
+
+  it('400 when points is negative', async () => {
+    const req = {
+      user: { id: 'user-uuid' },
+      project: { id: 'project-uuid' },
+      params: { id: 'task-uuid' },
+      body: { points: -1 }
+    };
+    const res = mockRes();
+
+    await updateTask(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith({ message: 'points must be a non-negative integer' });
+    expect(pool.query).not.toHaveBeenCalled();
+  });
+
+  it('200 replaces labels wholesale', async () => {
+    const taskRow = { id: 'task-uuid', ticket_id: 'ACM-1', labels: ['ui', 'integration'] };
+    pool.query
+      .mockResolvedValueOnce({ rows: [{ id: 'task-uuid' }] })
+      .mockResolvedValueOnce({ rows: [taskRow] });
+
+    const req = {
+      user: { id: 'user-uuid' },
+      project: { id: 'project-uuid' },
+      params: { id: 'task-uuid' },
+      body: { labels: ['ui', '  integration  '] }
+    };
+    const res = mockRes();
+
+    await updateTask(req, res);
+
+    expect(pool.query.mock.calls[0][1]).toContainEqual(['ui', 'integration']);
+    expect(res.status).toHaveBeenCalledWith(200);
+  });
+
+  it('400 when labels contains a non-string entry', async () => {
+    const req = {
+      user: { id: 'user-uuid' },
+      project: { id: 'project-uuid' },
+      params: { id: 'task-uuid' },
+      body: { labels: ['ui', 42] }
+    };
+    const res = mockRes();
+
+    await updateTask(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith({ message: 'each label must be a non-empty string' });
+    expect(pool.query).not.toHaveBeenCalled();
+  });
+
+  it('200 reorders among siblings under the same parent_id (reorder_scope: siblings)', async () => {
+    const taskRow = { id: 'task-uuid', ticket_id: 'ACM-1', parent_id: 'story-uuid', rank: 1500 };
+    pool.query
+      .mockResolvedValueOnce({ rows: [{ type: 'TASK', details: {}, parent_id: 'story-uuid', sprint_id: null } ] }) // current row (parent_id needed)
+      .mockResolvedValueOnce({
+        rows: [
+          { id: 'sibling-1', rank: '1000' },
+          { id: 'sibling-2', rank: '2000' }
+        ]
+      }) // siblings scoped by parent_id, not sprint_id
+      .mockResolvedValueOnce({ rows: [{ id: 'task-uuid' }] }) // UPDATE tasks
+      .mockResolvedValueOnce({ rows: [taskRow] });            // re-read via TASK_SELECT
+
+    const req = {
+      user: { id: 'user-uuid' },
+      project: { id: 'project-uuid' },
+      params: { id: 'task-uuid' },
+      body: { reorder_scope: 'siblings', after_task_id: 'sibling-1' }
+    };
+    const res = mockRes();
+
+    await updateTask(req, res);
+
+    expect(pool.query.mock.calls[1][0]).toEqual(expect.stringContaining('parent_id = $2'));
+    expect(pool.query.mock.calls[1][1]).toEqual(['project-uuid', 'story-uuid']);
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(res.json).toHaveBeenCalledWith(taskRow);
+  });
+
+  it('400 when reorder_scope "siblings" is used on a task with no parent_id', async () => {
+    pool.query.mockResolvedValueOnce({ rows: [{ type: 'STORY', details: {}, parent_id: null, sprint_id: null }] }); // current row
+
+    const req = {
+      user: { id: 'user-uuid' },
+      project: { id: 'project-uuid' },
+      params: { id: 'task-uuid' },
+      body: { reorder_scope: 'siblings', after_task_id: null }
+    };
+    const res = mockRes();
+
+    await updateTask(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith({
+      message: 'reorder_scope "siblings" requires the task to have a parent_id'
+    });
   });
 });
 
@@ -650,6 +943,7 @@ describe('taskController.updateTaskType', () => {
       .mockResolvedValueOnce({ rows: [taskRow] });            // re-read via TASK_SELECT
 
     const req = {
+      user: { id: 'user-uuid' },
       project: { id: 'project-uuid' },
       params: { id: 'task-uuid' },
       body: { type: 'bug' }
@@ -668,6 +962,7 @@ describe('taskController.updateTaskType', () => {
     pool.query.mockResolvedValueOnce({ rows: [{ details: { acceptance_criteria: 'Done when...' } }] });
 
     const req = {
+      user: { id: 'user-uuid' },
       project: { id: 'project-uuid' },
       params: { id: 'task-uuid' },
       body: { type: 'bug' }

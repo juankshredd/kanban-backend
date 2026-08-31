@@ -1,5 +1,5 @@
 'use strict';
-const { lines, request, folder, asUserA, asUserC, status, hasProp, messageIsString, bodyVar } = require('./helpers');
+const { lines, request, folder, asUserA, asUserB, asUserC, status, hasProp, messageIsString, bodyVar } = require('./helpers');
 
 const tasksFolder = folder('04 - Tasks', [
   request('Create Task (canonical, under project)', 'POST', '{{baseUrl}}/projects/{{projectId}}/tasks', {
@@ -146,17 +146,19 @@ const tasksFolder = folder('04 - Tasks', [
     body: { status: 'done' },
     tests: lines(status(404), messageIsString()),
   }),
-  request('Create Relation "related to" (canonical route)', 'POST', '{{baseUrl}}/projects/{{projectId}}/tasks/{{task1Id}}/relations', {
+  request('Create Relation "relates to" (canonical route, default relation_type)', 'POST', '{{baseUrl}}/projects/{{projectId}}/tasks/{{task1Id}}/relations', {
     auth: asUserA,
-    description: 'Relación simétrica y sin restricción de tipo, distinta de la jerarquía parent_id.',
+    description: 'Relación simétrica y sin restricción de tipo, distinta de la jerarquía parent_id. relation_type se omite -> default RELATED_TO.',
     body: { related_task_id: '{{task2Id}}' },
     tests: lines(
       status(201),
       bodyVar,
-      "pm.test('Relation links task1 and task2', function () {",
+      "pm.test('Relation links task1 and task2 as RELATED_TO', function () {",
       "  pm.expect(body.task_id).to.eql(pm.environment.get('task1Id'));",
       "  pm.expect(body.related_task_id).to.eql(pm.environment.get('task2Id'));",
-      '});'
+      "  pm.expect(body.relation_type).to.eql('RELATED_TO');",
+      '});',
+      "pm.environment.set('relation1Id', body.id);"
     ),
   }),
   request('Create Relation - Self Relation (negative)', 'POST', '{{baseUrl}}/projects/{{projectId}}/tasks/{{task1Id}}/relations', {
@@ -186,30 +188,188 @@ const tasksFolder = folder('04 - Tasks', [
     tests: lines(
       status(200),
       bodyVar,
-      "pm.test('Includes task2 as a related task', function () {",
-      "  pm.expect(body.some((r) => r.task.id === pm.environment.get('task2Id'))).to.be.true;",
+      "pm.test('Includes task2 as a related task, labeled \"relates to\"', function () {",
+      "  const rel = body.find((r) => r.task.id === pm.environment.get('task2Id'));",
+      "  pm.expect(rel).to.not.be.undefined;",
+      "  pm.expect(rel.type).to.eql('relates to');",
       '});'
     ),
   }),
-  request('Delete Relation (cross-project route)', 'DELETE', '{{baseUrl}}/tasks/{{task1Id}}/relations/{{task2Id}}', {
+  request('Create Relation - Directional (task2 BLOCKS task1)', 'POST', '{{baseUrl}}/projects/{{projectId}}/tasks/{{task2Id}}/relations', {
     auth: asUserA,
-    description: 'Ejercita la ruta transversal /api/tasks/:id/relations/:relatedTaskId, resuelta vía requireProjectMemberForResource.',
+    description: 'relation_type explícito, direccional: no pasa por el índice único simétrico.',
+    body: { related_task_id: '{{task1Id}}', relation_type: 'blocks' },
+    tests: lines(status(201), bodyVar, "pm.environment.set('relation2Id', body.id);"),
+  }),
+  request('List Relations For task1 - Sees The Inverse Label', 'GET', '{{baseUrl}}/projects/{{projectId}}/tasks/{{task1Id}}/relations', {
+    auth: asUserA,
+    description: 'task1 es el lado related_task_id del BLOCKS que acaba de crear task2, así que ve el inverso.',
+    tests: lines(
+      status(200),
+      bodyVar,
+      "pm.test('Sees task2 labeled \"is blocked by\" (inverse of BLOCKS)', function () {",
+      "  const rel = body.find((r) => r.task.id === pm.environment.get('task2Id') && r.type === 'is blocked by');",
+      "  pm.expect(rel).to.not.be.undefined;",
+      '});'
+    ),
+  }),
+  request('Delete Relation - By relationId (cross-project route)', 'DELETE', '{{baseUrl}}/tasks/{{task1Id}}/relations/{{relation1Id}}', {
+    auth: asUserA,
+    description: 'Ejercita la ruta transversal /api/tasks/:id/relations/:relationId, resuelta vía requireProjectMemberForResource. Se borra por el id propio de la relación, no por la otra tarea, porque puede haber más de un relation_type activo entre el mismo par.',
     tests: lines(status(200), bodyVar, "pm.expect(body.message).to.eql('Relation removed successfully');"),
   }),
-  request('List Relations For task1 - Empty After Delete', 'GET', '{{baseUrl}}/projects/{{projectId}}/tasks/{{task1Id}}/relations', {
-    auth: asUserA,
-    tests: lines(status(200), bodyVar, "pm.expect(body).to.eql([]);"),
-  }),
-  request('Delete Relation - Not Found (negative)', 'DELETE', '{{baseUrl}}/tasks/{{task1Id}}/relations/{{task2Id}}', {
+  request('Delete Relation - Not Found (negative)', 'DELETE', '{{baseUrl}}/tasks/{{task1Id}}/relations/{{relation1Id}}', {
     auth: asUserA,
     description: 'Ya se borró en el request anterior.',
     tests: lines(status(404), messageIsString()),
+  }),
+  request('Delete Relation - task2 BLOCKS task1 (cleanup)', 'DELETE', '{{baseUrl}}/projects/{{projectId}}/tasks/{{task2Id}}/relations/{{relation2Id}}', {
+    auth: asUserA,
+    tests: lines(status(200)),
   }),
   request('Delete Task - Not TODO (negative)', 'DELETE', '{{baseUrl}}/projects/{{projectId}}/tasks/{{task1Id}}', {
     auth: asUserA,
     description: 'task1 está en IN_PROGRESS: solo se puede borrar en TODO.',
     tests: lines(status(400), messageIsString()),
   }),
-], { description: 'CRUD de tasks (rutas canónica y transversal), filtros, tipos, reorder por rank, relaciones "related to" y la regla "solo se borra en TODO". Deja task1/2/3Id listos para Sprints.' });
+
+  // --- Panel de detalle del modal de ticket: assignee/points/labels, búsqueda,
+  // reorder de subtasks por parent_id, comentarios y el endpoint agregado. Usa
+  // task4Id (STORY dedicada) en vez de task1/2/3 para no dejarles hijos colgando
+  // -- esos tres siguen intactos para 05-sprints-part1.js.
+  request('Create Task With points/labels/assignee_id', 'POST', '{{baseUrl}}/projects/{{projectId}}/tasks', {
+    auth: asUserA,
+    body: { title: 'Story para el modal de detalle', points: 5, labels: ['ui', 'integration'], assignee_id: '{{userBId}}' },
+    tests: lines(
+      status(201),
+      bodyVar,
+      "pm.test('Persists points, labels and assignee', function () {",
+      "  pm.expect(body.points).to.eql(5);",
+      "  pm.expect(body.labels).to.eql(['ui', 'integration']);",
+      "  pm.expect(body.assignee_id).to.eql(pm.environment.get('userBId'));",
+      '});',
+      "pm.environment.set('task4Id', body.id);"
+    ),
+  }),
+  request('Create Task - assignee_id Not A Project Member (negative)', 'POST', '{{baseUrl}}/projects/{{projectId}}/tasks', {
+    auth: asUserA,
+    body: { title: 'Asignada a alguien de afuera', assignee_id: '{{userCId}}' },
+    tests: lines(status(400), messageIsString()),
+  }),
+  request('Update Task - Reassign, Re-point, Re-label', 'PATCH', '{{baseUrl}}/projects/{{projectId}}/tasks/{{task4Id}}', {
+    auth: asUserA,
+    body: { assignee_id: null, points: 8, labels: [] },
+    tests: lines(
+      status(200),
+      bodyVar,
+      "pm.test('assignee_id cleared, points and labels replaced wholesale', function () {",
+      "  pm.expect(body.assignee_id).to.be.null;",
+      "  pm.expect(body.points).to.eql(8);",
+      "  pm.expect(body.labels).to.eql([]);",
+      "  pm.expect(body.updated_by).to.eql(pm.environment.get('userAId'));",
+      '});'
+    ),
+  }),
+  request('Update Task - Invalid points (negative)', 'PATCH', '{{baseUrl}}/projects/{{projectId}}/tasks/{{task4Id}}', {
+    auth: asUserA,
+    body: { points: -3 },
+    tests: lines(status(400), messageIsString()),
+  }),
+  request('List Project Tasks - Search by title', 'GET', '{{baseUrl}}/projects/{{projectId}}/tasks?search=modal de detalle', {
+    auth: asUserA,
+    tests: lines(
+      status(200),
+      bodyVar,
+      "pm.test('Finds task4 by title substring', function () {",
+      "  pm.expect(body.some((t) => t.id === pm.environment.get('task4Id'))).to.be.true;",
+      '});'
+    ),
+  }),
+  request('List Project Tasks - Search by ticket key', 'GET', '{{baseUrl}}/projects/{{projectId}}/tasks?search={{projectKey}}-1', {
+    auth: asUserA,
+    tests: lines(
+      status(200),
+      bodyVar,
+      "pm.test('Finds task1 by ticket key', function () {",
+      "  pm.expect(body.some((t) => t.id === pm.environment.get('task1Id'))).to.be.true;",
+      '});'
+    ),
+  }),
+  request('Create Subtask A (parent_id = task4)', 'POST', '{{baseUrl}}/projects/{{projectId}}/tasks', {
+    auth: asUserA,
+    body: { title: 'Subtask A', type: 'TASK', parent_id: '{{task4Id}}' },
+    tests: lines(status(201), bodyVar, "pm.environment.set('task5Id', body.id);"),
+  }),
+  request('Create Subtask B (parent_id = task4)', 'POST', '{{baseUrl}}/projects/{{projectId}}/tasks', {
+    auth: asUserA,
+    body: { title: 'Subtask B', type: 'TASK', parent_id: '{{task4Id}}' },
+    tests: lines(status(201), bodyVar, "pm.environment.set('task6Id', body.id);"),
+  }),
+  request('Update Task - Reorder Subtask B to top (reorder_scope: siblings)', 'PATCH', '{{baseUrl}}/projects/{{projectId}}/tasks/{{task6Id}}', {
+    auth: asUserA,
+    description: 'Reordena entre hermanos bajo el mismo parent_id, sin importar el sprint_id de cada uno -- distinto del reorder por defecto (Board/Backlog por sprint_id).',
+    body: { reorder_scope: 'siblings', after_task_id: null },
+    tests: lines(status(200)),
+  }),
+  request('Update Task - reorder_scope siblings without a parent_id (negative)', 'PATCH', '{{baseUrl}}/projects/{{projectId}}/tasks/{{task1Id}}', {
+    auth: asUserA,
+    description: 'task1 no tiene parent_id, así que no hay lista de hermanos que reordenar.',
+    body: { reorder_scope: 'siblings', after_task_id: null },
+    tests: lines(status(400), messageIsString()),
+  }),
+  request('Create Comment on task4', 'POST', '{{baseUrl}}/projects/{{projectId}}/tasks/{{task4Id}}/comments', {
+    auth: asUserA,
+    body: { content: 'Linked this to a blocker -- @qadetailstester can you retest?' },
+    tests: lines(status(201), bodyVar, "pm.environment.set('comment1Id', body.id);"),
+  }),
+  request('Create Comment - Missing Content (negative)', 'POST', '{{baseUrl}}/projects/{{projectId}}/tasks/{{task4Id}}/comments', {
+    auth: asUserA,
+    body: {},
+    tests: lines(status(400), messageIsString()),
+  }),
+  request('Create Comment - userB replies', 'POST', '{{baseUrl}}/tasks/{{task4Id}}/comments', {
+    auth: asUserB,
+    description: 'Ruta transversal /api/tasks/:id/comments.',
+    body: { content: 'Reproduced it, tracking above.' },
+    tests: lines(status(201), bodyVar, "pm.environment.set('comment2Id', body.id);"),
+  }),
+  request('List Comments on task4', 'GET', '{{baseUrl}}/projects/{{projectId}}/tasks/{{task4Id}}/comments', {
+    auth: asUserA,
+    tests: lines(
+      status(200),
+      bodyVar,
+      "pm.test('Contains both comments, ordered by created_at', function () {",
+      "  const ids = body.map((c) => c.id);",
+      "  pm.expect(ids).to.eql([pm.environment.get('comment1Id'), pm.environment.get('comment2Id')]);",
+      '});'
+    ),
+  }),
+  request("Delete Comment - userA (OWNER) moderates userB's comment", 'DELETE', '{{baseUrl}}/projects/{{projectId}}/tasks/{{task4Id}}/comments/{{comment2Id}}', {
+    auth: asUserA,
+    tests: lines(status(200), bodyVar, "pm.expect(body.message).to.eql('Comment deleted successfully');"),
+  }),
+  request('Delete Comment - Not Found (negative)', 'DELETE', '{{baseUrl}}/projects/{{projectId}}/tasks/{{task4Id}}/comments/{{comment2Id}}', {
+    auth: asUserA,
+    description: 'Ya se borró en el request anterior.',
+    tests: lines(status(404), messageIsString()),
+  }),
+  request('Get Task Detail (aggregate: task + parent + children + relations + sprint)', 'GET', '{{baseUrl}}/projects/{{projectId}}/tasks/{{task4Id}}/detail', {
+    auth: asUserA,
+    tests: lines(
+      status(200),
+      bodyVar,
+      "pm.test('Includes the task itself, its 2 children and no parent/sprint yet', function () {",
+      "  pm.expect(body.task.id).to.eql(pm.environment.get('task4Id'));",
+      "  pm.expect(body.children.map((c) => c.id)).to.have.members([pm.environment.get('task5Id'), pm.environment.get('task6Id')]);",
+      "  pm.expect(body.parent).to.be.null;",
+      "  pm.expect(body.sprint).to.be.null;",
+      '});'
+    ),
+  }),
+  request('Get Task Detail - Not Found (negative)', 'GET', '{{baseUrl}}/projects/{{projectId}}/tasks/00000000-0000-0000-0000-000000000000/detail', {
+    auth: asUserA,
+    tests: lines(status(404), messageIsString()),
+  }),
+], { description: 'CRUD de tasks (rutas canónica y transversal), filtros/búsqueda, tipos, reorder por rank (Board/Backlog y hermanos por parent_id), relaciones tipadas y direccionales, comentarios, el endpoint agregado de detalle, y la regla "solo se borra en TODO". Deja task1/2/3Id listos para Sprints.' });
 
 module.exports = tasksFolder;
