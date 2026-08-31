@@ -168,6 +168,25 @@ describe('taskRelationController.createRelation', () => {
     expect(res.status).toHaveBeenCalledWith(409);
     expect(res.json).toHaveBeenCalledWith({ message: 'Task no longer exists' });
   });
+
+  it('409 blaming the acting user when created_by no longer references a valid user', async () => {
+    pool.query
+      .mockResolvedValueOnce({ rows: [{ id: 'task-1' }, { id: 'task-2' }] })
+      .mockRejectedValueOnce({ code: '23503', constraint: 'task_relations_created_by_fkey' });
+
+    const req = {
+      user: { id: 'user-uuid' },
+      project: { id: 'project-uuid' },
+      params: { id: 'task-1' },
+      body: { related_task_id: 'task-2' }
+    };
+    const res = mockRes();
+
+    await createRelation(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(res.json).toHaveBeenCalledWith({ message: 'Acting user no longer exists' });
+  });
 });
 
 describe('taskRelationController.getRelations', () => {
@@ -204,7 +223,7 @@ describe('taskRelationController.getRelations', () => {
 
     await getRelations(req, res);
 
-    expect(pool.query.mock.calls[2][1]).toEqual([['task-2']]);
+    expect(pool.query.mock.calls[2][1]).toEqual([['task-2'], 'project-uuid']);
     expect(res.status).toHaveBeenCalledWith(200);
     expect(res.json).toHaveBeenCalledWith([
       { relation_id: 'relation-uuid', related_since: '2026-08-30T00:00:00.000Z', task: relatedTask }
@@ -281,6 +300,33 @@ describe('taskRelationController.deleteRelation', () => {
 
     expect(res.status).toHaveBeenCalledWith(404);
     expect(res.json).toHaveBeenCalledWith({ message: 'Relation not found' });
+  });
+
+  it('404 "Relation not found" when relatedTaskId is malformed, not "Task not found" (the anchor task exists)', async () => {
+    pool.query
+      .mockResolvedValueOnce({ rows: [{ id: 'task-1' }] })     // anchor task found
+      .mockRejectedValueOnce({ code: '22P02' });                // DELETE fails on the malformed relatedTaskId
+
+    const req = { project: { id: 'project-uuid' }, params: { id: 'task-1', relatedTaskId: 'not-a-uuid' } };
+    const res = mockRes();
+
+    await deleteRelation(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(404);
+    expect(res.json).toHaveBeenCalledWith({ message: 'Relation not found' });
+  });
+
+  it('404 "Task not found" when the anchor id itself is malformed', async () => {
+    pool.query.mockRejectedValueOnce({ code: '22P02' }); // findTaskInProject fails on the malformed :id
+
+    const req = { project: { id: 'project-uuid' }, params: { id: 'not-a-uuid', relatedTaskId: 'task-2' } };
+    const res = mockRes();
+
+    await deleteRelation(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(404);
+    expect(res.json).toHaveBeenCalledWith({ message: 'Task not found' });
+    expect(pool.query).toHaveBeenCalledTimes(1);
   });
 
   it('404 when the anchor task does not belong to the project', async () => {

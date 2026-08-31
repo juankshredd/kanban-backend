@@ -64,14 +64,16 @@ const createRelation = async (req, res) => {
       return res.status(409).json({ message: 'Tasks are already related' });
     }
 
-    // Una de las dos tareas era válida al chequearla pero fue borrada antes de
-    // que este INSERT corriera (carrera entre requests). El nombre de la FK
-    // violada dice cuál -- sin esto, una carrera sobre la tarea ancla (:id) se
-    // reportaría como si el problema fuera related_task_id.
+    // Una de las dos tareas (o, en el caso límite de un usuario borrado entre
+    // la emisión del JWT y este INSERT, el propio autor) era válida al
+    // chequearla pero dejó de existir antes de que este INSERT corriera. El
+    // nombre de la FK violada dice cuál.
     if (error.code === '23503') {
-      const message = error.constraint === 'task_relations_task_id_fkey'
-        ? 'Task no longer exists'
-        : 'related_task_id no longer exists';
+      const FK_MESSAGES = {
+        task_relations_task_id_fkey: 'Task no longer exists',
+        task_relations_created_by_fkey: 'Acting user no longer exists'
+      };
+      const message = FK_MESSAGES[error.constraint] || 'related_task_id no longer exists';
       return res.status(409).json({ message });
     }
 
@@ -117,8 +119,16 @@ const getRelations = async (req, res) => {
     // con ANY($1) reusando TASK_SELECT, merge en JS -- en vez de un JOIN
     // encima del CASE de arriba, que forzaría reescribir el FROM fijo de
     // TASK_SELECT.
+    // t.project_id = $2 es defensa en profundidad, no solo un filtro: hoy
+    // task_relations solo puede tener pares del mismo proyecto porque
+    // createRelation lo valida, pero esta query no debería depender de ese
+    // invariante siendo el único guardián -- mismo criterio que el resto del
+    // controller layer (ver "Task rules" en CLAUDE.md).
     const relatedTaskIds = relations.rows.map((row) => row.related_task_id);
-    const tasks = await pool.query(`${TASK_SELECT} WHERE t.id = ANY($1);`, [relatedTaskIds]);
+    const tasks = await pool.query(
+      `${TASK_SELECT} WHERE t.id = ANY($1) AND t.project_id = $2;`,
+      [relatedTaskIds, project_id]
+    );
     const tasksById = Object.fromEntries(tasks.rows.map((task) => [task.id, task]));
 
     // Las dos queries no van en la misma transacción: si la tarea relacionada
@@ -154,13 +164,28 @@ const deleteRelation = async (req, res) => {
   const project_id = req.project.id;
   const { id, relatedTaskId } = req.params;
 
+  // Try/catch separado del de abajo: para cuando llegamos a la query de
+  // DELETE, :id ya se probó válido y existente, así que un 22P02 ahí solo
+  // puede venir de relatedTaskId -- de lo contrario un relatedTaskId mal
+  // formado terminaría reportado como "Task not found" (la tarea ancla, que
+  // sí existe).
+  let task;
   try {
-    const task = await findTaskInProject(id, project_id);
-
-    if (!task) {
+    task = await findTaskInProject(id, project_id);
+  } catch (error) {
+    if (error.code === '22P02') {
       return res.status(404).json({ message: 'Task not found' });
     }
 
+    console.error("DELETE TASK RELATION ERROR:", error);
+    return res.status(500).json({ message: 'Server error' });
+  }
+
+  if (!task) {
+    return res.status(404).json({ message: 'Task not found' });
+  }
+
+  try {
     // El OR cubre los dos órdenes en los que el par pudo haberse insertado.
     const deleted = await pool.query(
       `
@@ -178,8 +203,9 @@ const deleteRelation = async (req, res) => {
     res.json({ message: 'Relation removed successfully' });
 
   } catch (error) {
+    // relatedTaskId mal formado: nunca puede matchear una relación real.
     if (error.code === '22P02') {
-      return res.status(404).json({ message: 'Task not found' });
+      return res.status(404).json({ message: 'Relation not found' });
     }
 
     console.error("DELETE TASK RELATION ERROR:", error);

@@ -4,6 +4,9 @@
 -- relaciones), así que no encaja como columna en tasks -- necesita su propia
 -- tabla N:M, igual que project_members/company_members.
 
+-- created_by es NOT NULL (igual que projects.created_by y
+-- retrospective_notes.author_id): cada relación tiene que tener un autor
+-- identificable.
 CREATE TABLE IF NOT EXISTS task_relations (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
@@ -11,14 +14,6 @@ CREATE TABLE IF NOT EXISTS task_relations (
   created_by UUID NOT NULL REFERENCES users(id),
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-
--- NOT NULL explícito además del de la definición de la columna: si esta
--- migración ya había corrido en una base contra una versión anterior del
--- archivo (created_by nullable), CREATE TABLE IF NOT EXISTS de arriba es un
--- no-op y no la agregaría -- mismo motivo que created_by, projects.created_by
--- y retrospective_notes.author_id son todos NOT NULL: cada relación tiene que
--- tener un autor identificable.
-ALTER TABLE task_relations ALTER COLUMN created_by SET NOT NULL;
 
 -- ON DELETE CASCADE (a diferencia de parent_id, que es RESTRICT): un link
 -- "related to" es una referencia liviana, no una relación de contención, así
