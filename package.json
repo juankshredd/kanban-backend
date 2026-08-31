@@ -9,7 +9,9 @@
     "dev": "node src/server.js",
     "migrate": "node scripts/migrate.js",
     "migrate:status": "node scripts/migrate.js status",
-    "seed:test": "node scripts/seedTestUser.js"
+    "seed:test": "node scripts/seedTestUser.js",
+    "test:postman": "newman run postman/kanban-backend.postman_collection.json -e postman/kanban-backend.postman_environment.json --reporters cli",
+    "postman:generate": "node postman/generate-collection.js"
   },
   "keywords": [],
   "author": "",
@@ -25,6 +27,7 @@
   },
   "devDependencies": {
     "jest": "^30.3.0",
-    "supertest": "^7.2.2"
+    "supertest": "^7.2.2",
+    "newman": "^6.2.2"
   }
 }

@@ -2,6 +2,11 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+Domain-specific documentation lives in nested `CLAUDE.md` files, loaded automatically only when Claude reads files in that directory (Claude Code's nested-memory-file mechanism — not always-loaded like this root file, so don't expect their content to be in context unless that directory is actually being touched):
+
+- `src/controllers/CLAUDE.md` — data model (all table schemas), and business rules per domain (auth, companies, projects, tasks incl. detail fields/hierarchy/relations/comments, sprints, board & backlog, retrospectives).
+- `migrations/CLAUDE.md` — migration mechanics (numbering, transactional apply, never-edit-an-applied-migration).
+
 ## Project
 
 Express + PostgreSQL REST API backend for a Kanban board app (`kanban-backend`). This is the backend half of a larger `kanban-dashboard-app`; a separate React frontend (not in this directory) runs at `http://localhost:3000` and is the only CORS-allowed origin (see `src/server.js`).
@@ -16,6 +21,8 @@ Express + PostgreSQL REST API backend for a Kanban board app (`kanban-backend`).
 - Apply pending DB migrations: `npm run migrate` — check what's applied vs. pending with `npm run migrate:status`
 
 No lint script is configured.
+
+- Run the Postman/Newman API-level QA suite (requires the server running on port 5000): `npm run test:postman` — see `postman/README.md`. Regenerate the collection after changing an endpoint with `npm run postman:generate` (never hand-edit the generated JSON).
 
 ## Git workflow
 
@@ -41,97 +48,11 @@ Standard layered Express structure under `src/`:
   - `requireProjectMemberFromBody` — id from `req.body.project_id`, for cross-project endpoints like `POST /api/tasks`.
   - `requireProjectMemberForResource(table)` — id resolved by looking up the resource itself, for `PATCH`/`DELETE /api/tasks/:id`. A factory; `table` comes from the `PROJECT_SCOPED_TABLES` whitelist, never from the request. Retro notes don't use this variant — they're one level deeper (project → sprint → note), so `retroController.js` instead re-validates `sprint_id` belongs to `req.project.id` on every handler (see `findSprintInProject`/`findOwnNote`) rather than trying to force a two-hop lookup through the single-table factory.
 - `middlewares/validateRegister.js` — request-body validation for registration, applied only to `POST /api/auth/register`.
-- `controllers/*.js` — route handlers containing business logic; talk to Postgres directly via raw parameterized SQL through `pool.query(...)`.
+- `controllers/*.js` — route handlers containing business logic; talk to Postgres directly via raw parameterized SQL through `pool.query(...)`. See `src/controllers/CLAUDE.md` for the data model and per-domain business rules.
 
-### Migrations
+## Postman / Newman (API-level QA suite)
 
-Schema changes live in `migrations/*.sql`, applied in filename order by `scripts/migrate.js` (`npm run migrate`). Each file runs inside its own transaction and is recorded in the `schema_migrations` table, so re-running is a no-op. Never edit a migration that has already been applied — add a new numbered one instead.
-
-`000_initial_schema.sql` documents the `users`/`tasks` tables that predate the migration system; it uses `IF NOT EXISTS` throughout so it is a no-op against the existing database and a bootstrap for a fresh one.
-
-### Data model
-
-- `users` table: `id`, `username`, `email`, `password_hash` (bcrypt-hashed), `is_active` (boolean, used for soft deactivate/reactivate).
-- `tasks` table: `id` (uuid, `gen_random_uuid()`), `user_id` (FK to users), `title`, `description`, `status` (Postgres ENUM: `TODO`, `IN_PROGRESS`, `DONE`), `type` (Postgres ENUM: `EPIC`, `STORY`, `TASK`, `BUG`, defaults to `STORY`), `project_id` (FK to projects), `ticket_number` (int), `rank` (`numeric`, `NOT NULL` — manual Board/Backlog ordering, one global sequence per project; see "Board & Backlog rules"), `created_at`, `updated_at`.
-- `companies` table: `id` (uuid), `name`, `description`, `created_by` (FK to users), timestamps. The top-level container above projects — no `key`/ticket-prefix concept, since ticket ids are still derived per-project, not per-company.
-- `company_members` table: `(company_id, user_id)` unique, `role` (Postgres ENUM: `OWNER`, `MEMBER`) — same shape as `project_members`, one level up.
-- `projects` table: `id` (uuid), `key` (unique, `^[A-Z][A-Z0-9]{1,9}$` — the visible ticket prefix), `name`, `description`, `created_by` (FK to users), `company_id` (FK to companies, `NOT NULL`, `ON DELETE CASCADE`), `next_ticket_number` (atomic counter), timestamps.
-- `project_members` table: `(project_id, user_id)` unique, `role` (Postgres ENUM: `OWNER`, `MEMBER`). Projects are multi-user by design; membership — not `tasks.user_id` — is the intended authorization boundary going forward.
-- `sprints` table: `id`, `project_id` (FK), `name`, `goal`, `status` (Postgres ENUM: `PLANNED`, `ACTIVE`, `COMPLETED`), `start_date`, `end_date`, timestamps. A partial unique index (`one_active_sprint_per_project`) enforces at most one `ACTIVE` sprint per project — `startSprint` relies on this to turn a race into a `409` rather than checking-then-writing. `tasks.sprint_id` (nullable FK, `ON DELETE SET NULL`) is the Backlog/Sprint split: `NULL` means Backlog.
-- `retrospective_notes` table: `id`, `sprint_id` (FK, `ON DELETE CASCADE` — unlike tasks, a note has no identity outside its sprint), `author_id` (FK to users), `category` (Postgres ENUM: `WENT_WELL`, `TO_IMPROVE`, `ACTION_ITEM`), `content`, timestamps.
-
-**Ticket IDs** (`KAN-42`) are *derived*, not stored: `project.key || '-' || task.ticket_number`. `ticket_number` must be assigned atomically via `UPDATE projects SET next_ticket_number = next_ticket_number + 1 ... RETURNING next_ticket_number - 1`, never via `MAX(ticket_number)+1` (races between concurrent users).
-
-Existing rows were backfilled into one auto-created project per user by `004_backfill_default_projects.sql`; `006` closed the expand/contract by making both columns `NOT NULL`.
-
-Likewise, `projects.company_id` went through the same expand/contract: `010` added it nullable, `011_backfill_devtest_company.sql` created a single `devTest` company and pointed every pre-existing project at it, and `012` closed it with `NOT NULL`. `011` is guarded on a specific dev-DB user id existing, so it's a no-op against CI's fresh database — see "Company rules" below.
-
-### Auth flow
-
-Registration hashes passwords with bcrypt and rejects duplicate emails. Login checks `is_active = true`, verifies the bcrypt hash, and issues a JWT (`{ id: user.id }`, 1h expiry) signed with `JWT_SECRET`. There is commented-out (unimplemented) logic in `authController.js` for rate-limiting failed login attempts — not currently enforced.
-
-### Company rules
-
-Companies are the container above projects. `companyController.js` / `companyRoutes.js`, mounted at `/api/companies`. `POST /api/companies` creates the company and its creator's `OWNER` membership in a single transaction, same reasoning as projects — a company without an owner would be unreachable. There's no `key`/ticket-prefix concept at this level.
-
-Deleting a company cascades to its projects (`ON DELETE CASCADE`, which from there cascades further into tasks/sprints/members like a normal project delete), so it returns `409` when the company still has projects unless `?force=true` is passed. The last `OWNER` of a company can be neither demoted nor removed — same `isLastOwner` guard as project membership.
-
-There are two route families for creating a project, both served by `projectController.createProject`:
-
-- `/api/companies/:companyId/projects` — canonical. Behind `requireCompanyMember`.
-- `POST /api/projects` — cross-company, requires `company_id` in the body via `requireCompanyMemberFromBody`.
-
-Either way the handler reads `req.company.id` (set by whichever company middleware ran), exactly how `createTask` reads `req.project.id` today. `GET /api/companies/:companyId/projects` (`getCompanyProjects`) is *not* "every project in the company" — it's still filtered by `project_members.user_id = req.user.id`, because being a company member only grants the right to create projects and administer the company, not automatic access to projects you weren't added to. `GET /api/projects` also accepts an optional `?company_id=` filter.
-
-The `devTest` company that migration `011` created owns every project that existed before this feature shipped — see "Data model" above.
-
-### Project rules
-
-Projects are the container for the board, backlog, sprints and retrospectives. `POST /api/projects` creates the project and its creator's `OWNER` membership in a single transaction — a project without an owner would be unreachable even to its creator. If `key` is omitted it is derived from the name (`"Mi Tablero"` → `MIT`, then `MIT2`…); if supplied it is upper-cased and must match `^[A-Z][A-Z0-9]{1,9}$`.
-
-A project's `key` is deliberately **not** editable via `PATCH` — it is the prefix of every ticket id already handed out. Deleting a project cascades to its tasks and members, so it returns `409` when the project still has tasks unless `?force=true` is passed. The last `OWNER` of a project can be neither demoted nor removed.
-
-### Task rules
-
-Tasks are authorized by **project membership**, not by `tasks.user_id` (which is now just who created it). Any member of a project can read and mutate its tasks. There are two route families, both served by the same `taskController.js` handlers:
-
-- `/api/projects/:projectId/tasks` — canonical, the board of one project. Behind `requireProjectMember`.
-- `/api/tasks` — cross-project. `GET` is the "my work" view across every project the user belongs to (optional `?project_id=`), `POST` requires `project_id` in the body, and `PATCH`/`DELETE /:id` resolve the project from the task itself.
-
-Handlers read the project from `req.project.id` and scope every query with `WHERE id = $1 AND project_id = $2`, so a task from another project can't be reached through a project you do belong to. `PATCH` accepts `status`, `type`, `sprint_id` and/or `after_task_id` (at least one). Deletion is still restricted to tasks with `status = 'TODO'`.
-
-`sprint_id` uses `hasOwnProperty` rather than `!== undefined` to tell "not sent" from "sent as `null`" — the latter is how a task moves back to the Backlog. A non-null `sprint_id` is validated against `sprints.project_id` so a task can't end up pointing at another project's sprint. List endpoints (`getProjectTasks`/`getMyTasks`) accept `?sprint_id=<uuid>` or the keyword `?sprint_id=backlog` (there's no way to put a literal `NULL` in a query string) via the shared `buildTaskFilters` — the same filter helper also handles `?status=` and `?type=`, so a new filter is one branch added there rather than a new endpoint. `getProjectTasks` orders by `rank` (see "Board & Backlog rules" below); `getMyTasks` still orders by `created_at DESC` since it spans multiple projects, where one project's `rank` isn't a meaningful cross-project order.
-
-### Sprint rules
-
-`sprintController.js` / `projectSprintRoutes.js`, mounted at `/api/projects/:projectId/sprints`. Any project member can create/start/complete/delete sprints — unlike project membership management, this isn't OWNER-gated.
-
-- `POST /` creates a sprint in `PLANNED`.
-- `GET /:sprintId` returns a single sprint (`404` if it isn't found in the project); mounted after `GET /active` in `projectSprintRoutes.js` so `"active"` doesn't get swallowed by the `:sprintId` param.
-- `PATCH /:sprintId` updates `name`/`goal`/`start_date`/`end_date` only (same "at least one field, `undefined` vs `null` distinguishes unset vs. clear" pattern as `updateCompany`/`updateProject`). `status` is deliberately **not** editable here — it only changes through `/start` and `/complete`, which also move tasks and respect `one_active_sprint_per_project`.
-- `PATCH /:sprintId/start` moves `PLANNED` → `ACTIVE`; `400` if the sprint isn't `PLANNED`, `409` if another sprint in the project is already `ACTIVE` (caught from the unique-index violation, not pre-checked).
-- `PATCH /:sprintId/complete` moves `ACTIVE` → `COMPLETED` and, in the same transaction, sets `sprint_id = NULL` on every non-`DONE` task in that sprint (returned as `moved_to_backlog`) — finished work stays attached to the sprint as history, unfinished work returns to the Backlog instead of being stranded on a closed sprint.
-- `DELETE /:sprintId` only allowed while still `PLANNED` — deleting an `ACTIVE`/`COMPLETED` sprint would silently scatter its tasks to the Backlog via `ON DELETE SET NULL`; `completeSprint` is the explicit, auditable way to do that instead.
-- `GET /active` is the "Current Sprint" lookup a board view polls; `404` when none is active.
-
-### Board & Backlog rules
-
-`tasks.rank` (numeric, migration `013_task_rank.sql`) is **one global ordering sequence per project**, not one per sprint — this mirrors Jira's own model (a single ranked list; the Board and each Backlog section are just that list filtered by `sprint_id`), so relative order is automatically correct in any filtered view without maintaining a separate sequence per sprint/Backlog. `numeric`, not `float`: inserting between two neighbors via `(a + b) / 2` never loses precision even after many reorders, so there's no rebalance job. New tasks (`createTask`) always append to the end of the project's sequence (bottom of the Backlog, since new tasks have no `sprint_id` yet).
-
-Reordering goes through the existing `PATCH /api/tasks/:id` (`updateTask`), via an optional `after_task_id` — same `hasOwnProperty` trick as `sprint_id` (`null` = top of the destination list, absent = don't touch rank). The destination list is `project_id` + whatever `sprint_id` the task ends up with *after this same request* (its current `sprint_id` is looked up if not sent), matched with `IS NOT DISTINCT FROM` rather than `=` so Backlog-to-Backlog reorders (`sprint_id IS NULL`) work. This means one API call carries both "move to a different sprint" and "drop at this exact position" — exactly what a single drag-and-drop event needs to send.
-
-`boardController.js`, mounted directly in `projectRoutes.js` (leaf `GET`s, not a nested resource family — same pattern as `getProjectById`), exposes two read-optimized aggregate views built for a Jira-style UI so the frontend isn't composing several calls per screen:
-
-- `GET /api/projects/:projectId/board` — the active sprint + its tasks (ordered by `rank`) in one call; `404` if there's no active sprint. Deliberately separate from `sprintController.getActiveSprint` (used elsewhere for lighter widgets like a "Current Sprint" pill) so that endpoint doesn't get bloated with a full task list it doesn't need.
-- `GET /api/projects/:projectId/backlog` — every `PLANNED` sprint (ordered by `start_date`, nulls last) with its own tasks embedded, plus the unassigned Backlog tasks. Always exactly 3 queries (sprints, backlog tasks, all-sprints'-tasks via `sprint_id = ANY(...)`) regardless of how many future sprints exist, instead of `1 + N` round trips.
-
-Both reuse `taskController.js`'s `TASK_SELECT` (exported for this reason) rather than redefining the task projection — the first SQL fragment shared across controller files; every other `*_SELECT` (`SPRINT_SELECT`, `NOTE_SELECT`) is still private to its own controller.
-
-### Retrospective rules
-
-`retroController.js` / `projectRetroRoutes.js`, mounted at `/api/projects/:projectId/sprints/:sprintId/retrospective`. Any project member can read the retro and add notes; editing or deleting a note is restricted to its author, except deletion which the project `OWNER` can also do (light moderation, e.g. removing an inappropriate note).
-
-`GET /` returns notes pre-grouped into `{ WENT_WELL: [...], TO_IMPROVE: [...], ACTION_ITEM: [...] }` rather than a flat list — that's the shape a retro board renders directly, three columns, no client-side grouping. Every handler re-derives `req.user.username` via `NOTE_SELECT`'s join to `users` for `author_name`, since the JWT payload only carries `{ id }`.
+`postman/` holds a generated Postman collection (155 requests across 10 ordered folders) that exercises the whole API end-to-end against a real running server — complementary to the Jest suites above, which mock `src/db` and never hit Postgres. See `postman/README.md` for how it's organized, how to run it, and how to regenerate it after an endpoint changes. CI runs it with Newman on every push/PR, after the Jest step.
 
 ## Testing notes
 
