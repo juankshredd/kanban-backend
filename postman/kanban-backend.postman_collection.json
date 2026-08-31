@@ -3317,7 +3317,7 @@
           ]
         },
         {
-          "name": "Create Relation \"related to\" (canonical route)",
+          "name": "Create Relation \"relates to\" (canonical route, default relation_type)",
           "request": {
             "method": "POST",
             "header": [
@@ -3346,7 +3346,7 @@
                 }
               }
             },
-            "description": "Relación simétrica y sin restricción de tipo, distinta de la jerarquía parent_id."
+            "description": "Relación simétrica y sin restricción de tipo, distinta de la jerarquía parent_id. relation_type se omite -> default RELATED_TO."
           },
           "response": [],
           "event": [
@@ -3357,10 +3357,12 @@
                 "exec": [
                   "pm.test('Status code is 201', function () { pm.response.to.have.status(201); });",
                   "const body = pm.response.json();",
-                  "pm.test('Relation links task1 and task2', function () {",
+                  "pm.test('Relation links task1 and task2 as RELATED_TO', function () {",
                   "  pm.expect(body.task_id).to.eql(pm.environment.get('task1Id'));",
                   "  pm.expect(body.related_task_id).to.eql(pm.environment.get('task2Id'));",
-                  "});"
+                  "  pm.expect(body.relation_type).to.eql('RELATED_TO');",
+                  "});",
+                  "pm.environment.set('relation1Id', body.id);"
                 ]
               }
             }
@@ -3574,8 +3576,10 @@
                 "exec": [
                   "pm.test('Status code is 200', function () { pm.response.to.have.status(200); });",
                   "const body = pm.response.json();",
-                  "pm.test('Includes task2 as a related task', function () {",
-                  "  pm.expect(body.some((r) => r.task.id === pm.environment.get('task2Id'))).to.be.true;",
+                  "pm.test('Includes task2 as a related task, labeled \"relates to\"', function () {",
+                  "  const rel = body.find((r) => r.task.id === pm.environment.get('task2Id'));",
+                  "  pm.expect(rel).to.not.be.undefined;",
+                  "  pm.expect(rel.type).to.eql('relates to');",
                   "});"
                 ]
               }
@@ -3583,11 +3587,16 @@
           ]
         },
         {
-          "name": "Delete Relation (cross-project route)",
+          "name": "Create Relation - Directional (task2 BLOCKS task1)",
           "request": {
-            "method": "DELETE",
-            "header": [],
-            "url": "{{baseUrl}}/tasks/{{task1Id}}/relations/{{task2Id}}",
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/projects/{{projectId}}/tasks/{{task2Id}}/relations",
             "auth": {
               "type": "bearer",
               "bearer": [
@@ -3598,7 +3607,85 @@
                 }
               ]
             },
-            "description": "Ejercita la ruta transversal /api/tasks/:id/relations/:relatedTaskId, resuelta vía requireProjectMemberForResource."
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"related_task_id\": \"{{task1Id}}\",\n  \"relation_type\": \"blocks\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "relation_type explícito, direccional: no pasa por el índice único simétrico."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 201', function () { pm.response.to.have.status(201); });",
+                  "const body = pm.response.json();",
+                  "pm.environment.set('relation2Id', body.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List Relations For task1 - Sees The Inverse Label",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/projects/{{projectId}}/tasks/{{task1Id}}/relations",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{userAToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "task1 es el lado related_task_id del BLOCKS que acaba de crear task2, así que ve el inverso."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', function () { pm.response.to.have.status(200); });",
+                  "const body = pm.response.json();",
+                  "pm.test('Sees task2 labeled \"is blocked by\" (inverse of BLOCKS)', function () {",
+                  "  const rel = body.find((r) => r.task.id === pm.environment.get('task2Id') && r.type === 'is blocked by');",
+                  "  pm.expect(rel).to.not.be.undefined;",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Delete Relation - By relationId (cross-project route)",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": "{{baseUrl}}/tasks/{{task1Id}}/relations/{{relation1Id}}",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{userAToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "Ejercita la ruta transversal /api/tasks/:id/relations/:relationId, resuelta vía requireProjectMemberForResource. Se borra por el id propio de la relación, no por la otra tarea, porque puede haber más de un relation_type activo entre el mismo par."
           },
           "response": [],
           "event": [
@@ -3616,43 +3703,11 @@
           ]
         },
         {
-          "name": "List Relations For task1 - Empty After Delete",
-          "request": {
-            "method": "GET",
-            "header": [],
-            "url": "{{baseUrl}}/projects/{{projectId}}/tasks/{{task1Id}}/relations",
-            "auth": {
-              "type": "bearer",
-              "bearer": [
-                {
-                  "key": "token",
-                  "value": "{{userAToken}}",
-                  "type": "string"
-                }
-              ]
-            }
-          },
-          "response": [],
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('Status code is 200', function () { pm.response.to.have.status(200); });",
-                  "const body = pm.response.json();",
-                  "pm.expect(body).to.eql([]);"
-                ]
-              }
-            }
-          ]
-        },
-        {
           "name": "Delete Relation - Not Found (negative)",
           "request": {
             "method": "DELETE",
             "header": [],
-            "url": "{{baseUrl}}/tasks/{{task1Id}}/relations/{{task2Id}}",
+            "url": "{{baseUrl}}/tasks/{{task1Id}}/relations/{{relation1Id}}",
             "auth": {
               "type": "bearer",
               "bearer": [
@@ -3674,6 +3729,36 @@
                 "exec": [
                   "pm.test('Status code is 404', function () { pm.response.to.have.status(404); });",
                   "pm.test('Error response has a message string', function () { const body = pm.response.json(); pm.expect(body).to.have.property('message'); pm.expect(typeof body.message).to.eql('string'); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Delete Relation - task2 BLOCKS task1 (cleanup)",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": "{{baseUrl}}/projects/{{projectId}}/tasks/{{task2Id}}/relations/{{relation2Id}}",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{userAToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', function () { pm.response.to.have.status(200); });"
                 ]
               }
             }
@@ -3710,9 +3795,757 @@
               }
             }
           ]
+        },
+        {
+          "name": "Create Task With points/labels/assignee_id",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/projects/{{projectId}}/tasks",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{userAToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Story para el modal de detalle\",\n  \"points\": 5,\n  \"labels\": [\n    \"ui\",\n    \"integration\"\n  ],\n  \"assignee_id\": \"{{userBId}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 201', function () { pm.response.to.have.status(201); });",
+                  "const body = pm.response.json();",
+                  "pm.test('Persists points, labels and assignee', function () {",
+                  "  pm.expect(body.points).to.eql(5);",
+                  "  pm.expect(body.labels).to.eql(['ui', 'integration']);",
+                  "  pm.expect(body.assignee_id).to.eql(pm.environment.get('userBId'));",
+                  "});",
+                  "pm.environment.set('task4Id', body.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create Task - assignee_id Not A Project Member (negative)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/projects/{{projectId}}/tasks",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{userAToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Asignada a alguien de afuera\",\n  \"assignee_id\": \"{{userCId}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 400', function () { pm.response.to.have.status(400); });",
+                  "pm.test('Error response has a message string', function () { const body = pm.response.json(); pm.expect(body).to.have.property('message'); pm.expect(typeof body.message).to.eql('string'); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Update Task - Reassign, Re-point, Re-label",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/projects/{{projectId}}/tasks/{{task4Id}}",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{userAToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"assignee_id\": null,\n  \"points\": 8,\n  \"labels\": []\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', function () { pm.response.to.have.status(200); });",
+                  "const body = pm.response.json();",
+                  "pm.test('assignee_id cleared, points and labels replaced wholesale', function () {",
+                  "  pm.expect(body.assignee_id).to.be.null;",
+                  "  pm.expect(body.points).to.eql(8);",
+                  "  pm.expect(body.labels).to.eql([]);",
+                  "  pm.expect(body.updated_by).to.eql(pm.environment.get('userAId'));",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Update Task - Invalid points (negative)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/projects/{{projectId}}/tasks/{{task4Id}}",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{userAToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"points\": -3\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 400', function () { pm.response.to.have.status(400); });",
+                  "pm.test('Error response has a message string', function () { const body = pm.response.json(); pm.expect(body).to.have.property('message'); pm.expect(typeof body.message).to.eql('string'); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List Project Tasks - Search by title",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/projects/{{projectId}}/tasks?search=modal de detalle",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{userAToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', function () { pm.response.to.have.status(200); });",
+                  "const body = pm.response.json();",
+                  "pm.test('Finds task4 by title substring', function () {",
+                  "  pm.expect(body.some((t) => t.id === pm.environment.get('task4Id'))).to.be.true;",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List Project Tasks - Search by ticket key",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/projects/{{projectId}}/tasks?search={{projectKey}}-1",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{userAToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', function () { pm.response.to.have.status(200); });",
+                  "const body = pm.response.json();",
+                  "pm.test('Finds task1 by ticket key', function () {",
+                  "  pm.expect(body.some((t) => t.id === pm.environment.get('task1Id'))).to.be.true;",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create Subtask A (parent_id = task4)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/projects/{{projectId}}/tasks",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{userAToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Subtask A\",\n  \"type\": \"TASK\",\n  \"parent_id\": \"{{task4Id}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 201', function () { pm.response.to.have.status(201); });",
+                  "const body = pm.response.json();",
+                  "pm.environment.set('task5Id', body.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create Subtask B (parent_id = task4)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/projects/{{projectId}}/tasks",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{userAToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Subtask B\",\n  \"type\": \"TASK\",\n  \"parent_id\": \"{{task4Id}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 201', function () { pm.response.to.have.status(201); });",
+                  "const body = pm.response.json();",
+                  "pm.environment.set('task6Id', body.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Update Task - Reorder Subtask B to top (reorder_scope: siblings)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/projects/{{projectId}}/tasks/{{task6Id}}",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{userAToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reorder_scope\": \"siblings\",\n  \"after_task_id\": null\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Reordena entre hermanos bajo el mismo parent_id, sin importar el sprint_id de cada uno -- distinto del reorder por defecto (Board/Backlog por sprint_id)."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', function () { pm.response.to.have.status(200); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Update Task - reorder_scope siblings without a parent_id (negative)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/projects/{{projectId}}/tasks/{{task1Id}}",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{userAToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reorder_scope\": \"siblings\",\n  \"after_task_id\": null\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "task1 no tiene parent_id, así que no hay lista de hermanos que reordenar."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 400', function () { pm.response.to.have.status(400); });",
+                  "pm.test('Error response has a message string', function () { const body = pm.response.json(); pm.expect(body).to.have.property('message'); pm.expect(typeof body.message).to.eql('string'); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create Comment on task4",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/projects/{{projectId}}/tasks/{{task4Id}}/comments",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{userAToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"content\": \"Linked this to a blocker -- @qadetailstester can you retest?\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 201', function () { pm.response.to.have.status(201); });",
+                  "const body = pm.response.json();",
+                  "pm.environment.set('comment1Id', body.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create Comment - Missing Content (negative)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/projects/{{projectId}}/tasks/{{task4Id}}/comments",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{userAToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 400', function () { pm.response.to.have.status(400); });",
+                  "pm.test('Error response has a message string', function () { const body = pm.response.json(); pm.expect(body).to.have.property('message'); pm.expect(typeof body.message).to.eql('string'); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create Comment - userB replies",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/tasks/{{task4Id}}/comments",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{userBToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"content\": \"Reproduced it, tracking above.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Ruta transversal /api/tasks/:id/comments."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 201', function () { pm.response.to.have.status(201); });",
+                  "const body = pm.response.json();",
+                  "pm.environment.set('comment2Id', body.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List Comments on task4",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/projects/{{projectId}}/tasks/{{task4Id}}/comments",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{userAToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', function () { pm.response.to.have.status(200); });",
+                  "const body = pm.response.json();",
+                  "pm.test('Contains both comments, ordered by created_at', function () {",
+                  "  const ids = body.map((c) => c.id);",
+                  "  pm.expect(ids).to.eql([pm.environment.get('comment1Id'), pm.environment.get('comment2Id')]);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Delete Comment - userA (OWNER) moderates userB's comment",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": "{{baseUrl}}/projects/{{projectId}}/tasks/{{task4Id}}/comments/{{comment2Id}}",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{userAToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', function () { pm.response.to.have.status(200); });",
+                  "const body = pm.response.json();",
+                  "pm.expect(body.message).to.eql('Comment deleted successfully');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Delete Comment - Not Found (negative)",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": "{{baseUrl}}/projects/{{projectId}}/tasks/{{task4Id}}/comments/{{comment2Id}}",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{userAToken}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "description": "Ya se borró en el request anterior."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 404', function () { pm.response.to.have.status(404); });",
+                  "pm.test('Error response has a message string', function () { const body = pm.response.json(); pm.expect(body).to.have.property('message'); pm.expect(typeof body.message).to.eql('string'); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get Task Detail (aggregate: task + parent + children + relations + sprint)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/projects/{{projectId}}/tasks/{{task4Id}}/detail",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{userAToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', function () { pm.response.to.have.status(200); });",
+                  "const body = pm.response.json();",
+                  "pm.test('Includes the task itself, its 2 children and no parent/sprint yet', function () {",
+                  "  pm.expect(body.task.id).to.eql(pm.environment.get('task4Id'));",
+                  "  pm.expect(body.children.map((c) => c.id)).to.have.members([pm.environment.get('task5Id'), pm.environment.get('task6Id')]);",
+                  "  pm.expect(body.parent).to.be.null;",
+                  "  pm.expect(body.sprint).to.be.null;",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get Task Detail - Not Found (negative)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/projects/{{projectId}}/tasks/00000000-0000-0000-0000-000000000000/detail",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{userAToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 404', function () { pm.response.to.have.status(404); });",
+                  "pm.test('Error response has a message string', function () { const body = pm.response.json(); pm.expect(body).to.have.property('message'); pm.expect(typeof body.message).to.eql('string'); });"
+                ]
+              }
+            }
+          ]
         }
       ],
-      "description": "CRUD de tasks (rutas canónica y transversal), filtros, tipos, reorder por rank, relaciones \"related to\" y la regla \"solo se borra en TODO\". Deja task1/2/3Id listos para Sprints."
+      "description": "CRUD de tasks (rutas canónica y transversal), filtros/búsqueda, tipos, reorder por rank (Board/Backlog y hermanos por parent_id), relaciones tipadas y direccionales, comentarios, el endpoint agregado de detalle, y la regla \"solo se borra en TODO\". Deja task1/2/3Id listos para Sprints."
     },
     {
       "name": "05 - Sprints (part 1)",

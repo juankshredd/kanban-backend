@@ -4,7 +4,7 @@ jest.mock('../db', () => ({
 }));
 
 const pool = require('../db');
-const { getBoard, getBacklogView, getTaskHierarchy } = require('./boardController');
+const { getBoard, getBacklogView, getTaskHierarchy, getTaskDetail } = require('./boardController');
 
 const mockRes = () => {
   const res = {};
@@ -177,5 +177,118 @@ describe('boardController.getTaskHierarchy', () => {
 
     expect(res.status).toHaveBeenCalledWith(500);
     expect(res.json).toHaveBeenCalledWith({ message: 'Server error' });
+  });
+});
+
+describe('boardController.getTaskDetail', () => {
+  afterEach(() => {
+    jest.clearAllMocks();
+  });
+
+  // Las 4 queries de detalle corren en paralelo (Promise.all), así que el
+  // orden exacto de llamadas a pool.query no está garantizado por índice --
+  // se resuelve cada una inspeccionando el SQL, en vez de encadenar
+  // mockResolvedValueOnce como en los describes secuenciales de arriba.
+  it('200 + task, parent, children, relaciones agrupadas y sprint en una sola respuesta', async () => {
+    const task = { id: 'task-uuid', parent_id: 'parent-uuid', sprint_id: 'sprint-uuid', title: 'Story' };
+    const parent = { id: 'parent-uuid', title: 'Parent feature' };
+    const child = { id: 'child-uuid', parent_id: 'task-uuid', title: 'Subtask' };
+    const relatedTask = { id: 'related-uuid', title: 'Blocked task' };
+    const sprint = { id: 'sprint-uuid', name: 'Sprint 4', start_date: '2026-08-24', end_date: '2026-09-06' };
+
+    pool.query.mockImplementation((sql, params) => {
+      if (sql.includes('WHERE t.id = $1 AND t.project_id = $2') && params[0] === 'task-uuid') {
+        return Promise.resolve({ rows: [task] });
+      }
+      if (sql.includes('WHERE t.id = $1 AND t.project_id = $2') && params[0] === 'parent-uuid') {
+        return Promise.resolve({ rows: [parent] });
+      }
+      if (sql.includes('WHERE t.parent_id = $1 AND t.project_id = $2')) {
+        return Promise.resolve({ rows: [child] });
+      }
+      if (sql.includes('FROM task_relations')) {
+        return Promise.resolve({
+          rows: [{
+            relation_id: 'relation-uuid',
+            created_at: '2026-08-30T00:00:00.000Z',
+            relation_type: 'BLOCKS',
+            anchor_is_task_id: true,
+            related_task_id: 'related-uuid'
+          }]
+        });
+      }
+      if (sql.includes('t.id = ANY($1)')) {
+        return Promise.resolve({ rows: [relatedTask] });
+      }
+      if (sql.includes('FROM sprints')) {
+        return Promise.resolve({ rows: [sprint] });
+      }
+      throw new Error(`Unexpected query: ${sql}`);
+    });
+
+    const req = { project: { id: 'project-uuid' }, params: { id: 'task-uuid' } };
+    const res = mockRes();
+
+    await getTaskDetail(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(res.json).toHaveBeenCalledWith({
+      task,
+      parent,
+      children: [child],
+      relations: {
+        blocks: [{
+          relation_id: 'relation-uuid',
+          related_since: '2026-08-30T00:00:00.000Z',
+          type: 'blocks',
+          task: relatedTask
+        }]
+      },
+      sprint
+    });
+  });
+
+  it('200 + parent/sprint null y children/relations vacíos cuando la tarea no tiene ninguno', async () => {
+    const task = { id: 'task-uuid', parent_id: null, sprint_id: null, title: 'Root task' };
+
+    pool.query.mockImplementation((sql) => {
+      if (sql.includes('WHERE t.id = $1 AND t.project_id = $2')) {
+        return Promise.resolve({ rows: [task] });
+      }
+      if (sql.includes('WHERE t.parent_id = $1 AND t.project_id = $2')) {
+        return Promise.resolve({ rows: [] });
+      }
+      if (sql.includes('FROM task_relations')) {
+        return Promise.resolve({ rows: [] });
+      }
+      throw new Error(`Unexpected query: ${sql}`);
+    });
+
+    const req = { project: { id: 'project-uuid' }, params: { id: 'task-uuid' } };
+    const res = mockRes();
+
+    await getTaskDetail(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(res.json).toHaveBeenCalledWith({
+      task,
+      parent: null,
+      children: [],
+      relations: {},
+      sprint: null
+    });
+  });
+
+  it('404 when the task does not belong to the project', async () => {
+    pool.query.mockResolvedValueOnce({ rows: [] });
+
+    const req = { project: { id: 'project-uuid' }, params: { id: 'task-uuid' } };
+    const res = mockRes();
+
+    await getTaskDetail(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(404);
+    expect(res.json).toHaveBeenCalledWith({ message: 'Task not found' });
+    expect(pool.query).toHaveBeenCalledTimes(1);
   });
 });

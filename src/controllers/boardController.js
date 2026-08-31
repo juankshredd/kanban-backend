@@ -1,5 +1,6 @@
 const pool = require('../db');
 const { TASK_SELECT } = require('./taskController');
+const { fetchRelationsForTask } = require('./taskRelationController');
 
 // ----------------------------
 // Board: el sprint activo del proyecto + sus tareas, en un solo request
@@ -134,4 +135,68 @@ const getTaskHierarchy = async (req, res) => {
   }
 };
 
-module.exports = { getBoard, getBacklogView, getTaskHierarchy };
+// ----------------------------
+// Detalle de una tarea: tarea + padre + children + relaciones (ya agrupadas y
+// con el label resuelto) + sprint, en un solo request. Mismo criterio que
+// getBoard/getBacklogView/getTaskHierarchy: la pantalla del modal de detalle
+// necesita todo esto junto, no armado a mano con 4-5 llamadas por el frontend.
+// ----------------------------
+const getTaskDetail = async (req, res) => {
+  const project_id = req.project.id;
+  const { id } = req.params;
+
+  try {
+    const taskResult = await pool.query(`${TASK_SELECT} WHERE t.id = $1 AND t.project_id = $2;`, [id, project_id]);
+
+    if (taskResult.rows.length === 0) {
+      return res.status(404).json({ message: 'Task not found' });
+    }
+
+    const task = taskResult.rows[0];
+
+    // Las cuatro son independientes entre sí (solo dependen de `task`, ya
+    // resuelta arriba), así que corren en paralelo en vez de 4 round trips
+    // secuenciales -- la latencia de esta pantalla es la del más lento de los
+    // cuatro, no la suma.
+    const [parentResult, childrenResult, relations, sprintResult] = await Promise.all([
+      task.parent_id
+        ? pool.query(`${TASK_SELECT} WHERE t.id = $1 AND t.project_id = $2;`, [task.parent_id, project_id])
+        : Promise.resolve({ rows: [] }),
+      pool.query(`${TASK_SELECT} WHERE t.parent_id = $1 AND t.project_id = $2 ORDER BY t.rank;`, [id, project_id]),
+      fetchRelationsForTask(id, project_id),
+      task.sprint_id
+        ? pool.query(`SELECT id, name, start_date, end_date FROM sprints WHERE id = $1 AND project_id = $2;`, [task.sprint_id, project_id])
+        : Promise.resolve({ rows: [] })
+    ]);
+
+    // Agrupado por el label ya resuelto (relates to / blocks / is blocked
+    // by / ...), la misma forma que el picker del modal necesita para
+    // renderizar cada grupo -- sin esto el frontend tendría que agrupar en
+    // cliente lo que ya sabemos agrupar acá.
+    const relationsGrouped = {};
+    for (const relation of relations) {
+      if (!relationsGrouped[relation.type]) {
+        relationsGrouped[relation.type] = [];
+      }
+      relationsGrouped[relation.type].push(relation);
+    }
+
+    res.status(200).json({
+      task,
+      parent: parentResult.rows[0] || null,
+      children: childrenResult.rows,
+      relations: relationsGrouped,
+      sprint: sprintResult.rows[0] || null
+    });
+
+  } catch (error) {
+    if (error.code === '22P02') {
+      return res.status(404).json({ message: 'Task not found' });
+    }
+
+    console.error("GET TASK DETAIL ERROR:", error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+module.exports = { getBoard, getBacklogView, getTaskHierarchy, getTaskDetail };

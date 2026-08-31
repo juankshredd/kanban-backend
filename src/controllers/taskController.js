@@ -55,15 +55,23 @@ const TASK_SELECT = `
     t.rank,
     t.details,
     t.parent_id,
+    t.points,
+    t.labels,
     p.key AS project_key,
     p.name AS project_name,
     t.user_id,
     u.username AS user_name,
+    t.assignee_id,
+    a.username AS assignee_name,
+    t.updated_by,
+    ub.username AS updated_by_name,
     t.created_at,
     t.updated_at
   FROM tasks t
   JOIN projects p ON p.id = t.project_id
   LEFT JOIN users u ON u.id = t.user_id
+  LEFT JOIN users a ON a.id = t.assignee_id
+  LEFT JOIN users ub ON ub.id = t.updated_by
 `;
 
 // Devuelve el valor del ENUM o null si no es válido.
@@ -132,13 +140,65 @@ const validateParentId = async (parentId, childType, projectId) => {
   return { value: parentId };
 };
 
+// null/undefined siempre es válido (sin asignar); si no, tiene que ser un
+// miembro del proyecto -- asignar a alguien fuera del proyecto no tendría
+// forma de que esa persona vea la tarea en ningún lado.
+const validateAssigneeId = async (assigneeId, projectId) => {
+  if (assigneeId === null || assigneeId === undefined) {
+    return { value: null };
+  }
+
+  const member = await pool.query(
+    `SELECT user_id FROM project_members WHERE user_id = $1 AND project_id = $2;`,
+    [assigneeId, projectId]
+  );
+
+  if (member.rows.length === 0) {
+    return { error: 'assignee_id must be a member of this project' };
+  }
+
+  return { value: assigneeId };
+};
+
+const normalizePoints = (points) => {
+  if (points === null) {
+    return { value: null };
+  }
+
+  const numeric = Number(points);
+
+  if (!Number.isInteger(numeric) || numeric < 0) {
+    return { error: 'points must be a non-negative integer' };
+  }
+
+  return { value: numeric };
+};
+
+// Reemplazo total, no merge (mismo contrato que `details`): mandar `[]` borra
+// todas las labels.
+const normalizeLabels = (labels) => {
+  if (!Array.isArray(labels)) {
+    return { error: 'labels must be an array of strings' };
+  }
+
+  const normalized = [];
+  for (const label of labels) {
+    if (typeof label !== 'string' || !label.trim()) {
+      return { error: 'each label must be a non-empty string' };
+    }
+    normalized.push(label.trim());
+  }
+
+  return { value: normalized };
+};
+
 // ----------------------------
 // Crear tarea dentro de un proyecto
 // ----------------------------
 const createTask = async (req, res) => {
   const user_id = req.user.id;
   const project_id = req.project.id;      // lo dejó el middleware de acceso
-  const { title, description, type, details, parent_id } = req.body || {};
+  const { title, description, type, details, parent_id, assignee_id, points, labels } = req.body || {};
 
   if (!title || typeof title !== 'string' || !title.trim()) {
     return res.status(400).json({ message: 'Title is required' });
@@ -180,6 +240,44 @@ const createTask = async (req, res) => {
     throw error;
   }
 
+  let assigneeIdNormalized = null;
+  try {
+    const { error: assigneeError, value } = await validateAssigneeId(assignee_id ?? null, project_id);
+
+    if (assigneeError) {
+      return res.status(400).json({ message: assigneeError });
+    }
+
+    assigneeIdNormalized = value;
+  } catch (error) {
+    if (error.code === '22P02') {
+      return res.status(400).json({ message: 'Invalid assignee_id' });
+    }
+    throw error;
+  }
+
+  let pointsNormalized = null;
+  if (points !== undefined) {
+    const { error: pointsError, value } = normalizePoints(points);
+
+    if (pointsError) {
+      return res.status(400).json({ message: pointsError });
+    }
+
+    pointsNormalized = value;
+  }
+
+  let labelsNormalized = [];
+  if (labels !== undefined) {
+    const { error: labelsError, value } = normalizeLabels(labels);
+
+    if (labelsError) {
+      return res.status(400).json({ message: labelsError });
+    }
+
+    labelsNormalized = value;
+  }
+
   // El número de ticket sale de un contador por proyecto que se incrementa de
   // forma atómica: con MAX(ticket_number)+1 dos usuarios creando a la vez se
   // llevarían el mismo número. Va en transacción para que el contador no se
@@ -211,11 +309,14 @@ const createTask = async (req, res) => {
 
     const newTask = await client.query(
       `
-      INSERT INTO tasks (id, project_id, ticket_number, user_id, title, description, type, rank, details, parent_id)
-      VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9)
+      INSERT INTO tasks (id, project_id, ticket_number, user_id, title, description, type, rank, details, parent_id, assignee_id, points, labels)
+      VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
       RETURNING *;
       `,
-      [project_id, ticket_number, user_id, title.trim(), description || null, typeNormalized, nextRank, detailsNormalized, parentIdNormalized]
+      [
+        project_id, ticket_number, user_id, title.trim(), description || null, typeNormalized,
+        nextRank, detailsNormalized, parentIdNormalized, assigneeIdNormalized, pointsNormalized, labelsNormalized
+      ]
     );
 
     await client.query('COMMIT');
@@ -285,6 +386,15 @@ const buildTaskFilters = (query, values) => {
       values.push(query.parent_id);
       filters.push(`t.parent_id = $${values.length}`);
     }
+  }
+
+  // Búsqueda por key o título para el panel "Add related card": ambos lados
+  // reusan TASK_SELECT, que ya trae `p` en el FROM, así que p.key está
+  // disponible en los dos call sites (getProjectTasks y getMyTasks).
+  if (query.search !== undefined && String(query.search).trim() !== '') {
+    const term = `%${String(query.search).trim()}%`;
+    values.push(term, term);
+    filters.push(`(t.title ILIKE $${values.length - 1} OR (p.key || '-' || t.ticket_number) ILIKE $${values.length})`);
   }
 
   return { filters };
@@ -389,10 +499,27 @@ const updateTask = async (req, res) => {
   const { details } = body;
   const hasParentId = Object.prototype.hasOwnProperty.call(body, 'parent_id');
   const { parent_id } = body;
+  const hasAssigneeId = Object.prototype.hasOwnProperty.call(body, 'assignee_id');
+  const { assignee_id } = body;
+  const hasPoints = Object.prototype.hasOwnProperty.call(body, 'points');
+  const { points } = body;
+  const hasLabels = Object.prototype.hasOwnProperty.call(body, 'labels');
+  const { labels } = body;
+  // Selecciona la lista destino de after_task_id: 'siblings' reordena entre
+  // hermanos bajo el mismo parent_id (panel Child issues del modal de
+  // detalle); ausente/cualquier otro valor es el comportamiento existente,
+  // Board/Backlog por sprint_id. Es explícito y no inferido del parent_id de
+  // la tarea a propósito: una STORY con parent_id puede seguir apareciendo y
+  // reordenándose en el Board normal (que no filtra por parent_id), así que
+  // "tiene padre" no alcanza para saber qué lista está reordenando el cliente.
+  const { reorder_scope } = body;
 
-  if (status === undefined && type === undefined && !hasSprintId && !hasAfterTaskId && !hasDetails && !hasParentId) {
+  if (
+    status === undefined && type === undefined && !hasSprintId && !hasAfterTaskId &&
+    !hasDetails && !hasParentId && !hasAssigneeId && !hasPoints && !hasLabels
+  ) {
     return res.status(400).json({
-      message: 'Nothing to update: send status, type, sprint_id, details, parent_id and/or after_task_id'
+      message: 'Nothing to update: send status, type, sprint_id, details, parent_id, assignee_id, points, labels and/or after_task_id'
     });
   }
 
@@ -434,7 +561,8 @@ const updateTask = async (req, res) => {
     (typeNormalized && !hasDetails) ||
     (hasParentId && parent_id !== null && !typeNormalized) ||
     (typeNormalized && !hasParentId) ||
-    (hasAfterTaskId && !hasSprintId);
+    (hasAfterTaskId && reorder_scope !== 'siblings' && !hasSprintId) ||
+    (hasAfterTaskId && reorder_scope === 'siblings' && !hasParentId);
 
   let currentRow = null;
   if (needsCurrentRow) {
@@ -532,6 +660,54 @@ const updateTask = async (req, res) => {
     }
   }
 
+  if (hasAssigneeId) {
+    try {
+      const { error: assigneeError, value } = await validateAssigneeId(assignee_id, project_id);
+
+      if (assigneeError) {
+        return res.status(400).json({ message: assigneeError });
+      }
+
+      if (value === null) {
+        updates.push('assignee_id = NULL');
+      } else {
+        values.push(value);
+        updates.push(`assignee_id = $${values.length}`);
+      }
+    } catch (error) {
+      if (error.code === '22P02') {
+        return res.status(400).json({ message: 'Invalid assignee_id' });
+      }
+      throw error;
+    }
+  }
+
+  if (hasPoints) {
+    const { error: pointsError, value } = normalizePoints(points);
+
+    if (pointsError) {
+      return res.status(400).json({ message: pointsError });
+    }
+
+    if (value === null) {
+      updates.push('points = NULL');
+    } else {
+      values.push(value);
+      updates.push(`points = $${values.length}`);
+    }
+  }
+
+  if (hasLabels) {
+    const { error: labelsError, value } = normalizeLabels(labels);
+
+    if (labelsError) {
+      return res.status(400).json({ message: labelsError });
+    }
+
+    values.push(value);
+    updates.push(`labels = $${values.length}`);
+  }
+
   if (hasSprintId) {
     if (sprint_id === null) {
       // Mover al Backlog.
@@ -562,25 +738,44 @@ const updateTask = async (req, res) => {
 
   if (hasAfterTaskId) {
     try {
-      // El destino (Board de un sprint, o Backlog) es el sprint_id que la
-      // tarea va a tener después de este mismo request. Si no vino en el
-      // body, hay que leer el actual para saber en qué lista reordenar.
-      let destinationSprintId = sprint_id;
+      let list;
 
-      if (!hasSprintId) {
-        destinationSprintId = currentRow.sprint_id;
+      if (reorder_scope === 'siblings') {
+        // Reordenar entre hermanos bajo el mismo padre (panel Child issues) --
+        // sin filtrar por sprint_id, porque dos subtasks del mismo padre
+        // pueden estar en sprints distintos. Mismo rank global, solo otra
+        // vista filtrada (parent_id en vez de sprint_id), igual que ya
+        // documenta "Board & Backlog rules".
+        const destinationParentId = hasParentId ? parent_id : currentRow.parent_id;
+
+        if (destinationParentId === null || destinationParentId === undefined) {
+          return res.status(400).json({
+            message: 'reorder_scope "siblings" requires the task to have a parent_id'
+          });
+        }
+
+        list = await pool.query(
+          `SELECT id, rank FROM tasks WHERE project_id = $1 AND parent_id = $2 ORDER BY rank;`,
+          [project_id, destinationParentId]
+        );
+      } else {
+        // Comportamiento existente: Board/Backlog por sprint_id. El destino
+        // es el sprint_id que la tarea va a tener después de este mismo
+        // request. Si no vino en el body, hay que leer el actual para saber
+        // en qué lista reordenar.
+        const destinationSprintId = hasSprintId ? sprint_id : currentRow.sprint_id;
+
+        // IS NOT DISTINCT FROM (no '='): sprint_id NULL es una lista válida
+        // (el Backlog), y NULL = NULL da NULL/false con un '=' normal.
+        list = await pool.query(
+          `
+          SELECT id, rank FROM tasks
+          WHERE project_id = $1 AND sprint_id IS NOT DISTINCT FROM $2
+          ORDER BY rank;
+          `,
+          [project_id, destinationSprintId]
+        );
       }
-
-      // IS NOT DISTINCT FROM (no '='): sprint_id NULL es una lista válida
-      // (el Backlog), y NULL = NULL da NULL/false con un '=' normal.
-      const list = await pool.query(
-        `
-        SELECT id, rank FROM tasks
-        WHERE project_id = $1 AND sprint_id IS NOT DISTINCT FROM $2
-        ORDER BY rank;
-        `,
-        [project_id, destinationSprintId]
-      );
 
       const siblings = list.rows.filter((row) => row.id !== id);
 
@@ -613,6 +808,9 @@ const updateTask = async (req, res) => {
   }
 
   updates.push('updated_at = CURRENT_TIMESTAMP');
+  values.push(req.user.id);
+  updates.push(`updated_by = $${values.length}`);
+
   values.push(id, project_id);
 
   try {
