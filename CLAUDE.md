@@ -6,6 +6,7 @@ Domain-specific documentation lives in nested `CLAUDE.md` files, loaded automati
 
 - `src/controllers/CLAUDE.md` — data model (all table schemas), and business rules per domain (auth, companies, projects, tasks incl. detail fields/hierarchy/relations/comments, sprints, board & backlog, retrospectives).
 - `migrations/CLAUDE.md` — migration mechanics (numbering, transactional apply, never-edit-an-applied-migration).
+- `specs/CLAUDE.md` — spec-driven development convention: when to write a spec, the template to copy, and its lifecycle from draft through merging into the docs above.
 
 ## Project
 
@@ -27,6 +28,8 @@ No lint script is configured.
 ## Git workflow
 
 `dev` is branch-protected on GitHub ("Changes must be made through a pull request") and `master` presumably more so. **Never push or merge directly into `dev` or `master`** — do all work on a feature branch cut from `dev` (e.g. `feature/<name>`) and open a PR back into `dev` instead, even if a direct push would technically succeed for an admin account. If a push is rejected or bypasses the rule with a warning, treat that as a sign to stop and go through a PR rather than proceeding.
+
+**Cut the feature branch before the first edit, not before the first push.** If `git branch --show-current` reports `dev` or `master` at the start of a task, create/switch to a feature branch before touching any file — including docs-only changes (e.g. editing this file, adding a `specs/` entry). Don't let edits accumulate uncommitted on `dev` on the assumption they'll be moved to a branch later.
 
 **Always review a PR right after opening it**, using the `/code-review` skill against that PR (`/code-review ultra <PR#>` for a deeper multi-agent pass on larger/riskier changes) — don't wait to be asked. This is a manual, on-demand review done by invoking the skill, not an automated GitHub Action/bot; no CI workflow should be added for this unless explicitly requested. Report findings back in chat, or post them as inline PR comments with `--comment` when useful.
 
