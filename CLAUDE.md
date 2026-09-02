@@ -35,7 +35,7 @@ No lint script is configured.
 
 ## Environment
 
-Config is loaded via `dotenv` from a `.env` file (gitignored) at the project root, read in both `src/db.js` and `src/server.js`. Required variables: `DB_USER`, `DB_HOST`, `DB_NAME`, `DB_PASSWORD`, `DB_PORT`, `JWT_SECRET`. `src/server.js` reads `PORT` from `process.env.PORT`, falling back to `5000` when unset — local dev and CI never set `PORT`, so both still run on 5000; Render assigns its own via the injected env var. Two more optional variables exist for production only: `DB_SSL` (`"true"` enables `{ rejectUnauthorized: false }` in `src/db.js`'s `pg` `Pool` — required by Render's managed Postgres, unset/absent everywhere else) and `RENDER_DEPLOY_HOOK_URL` (a GitHub Actions secret, not a `.env` var — see Deployment below).
+Config is loaded via `dotenv` from a `.env` file (gitignored) at the project root, read in both `src/db.js` and `src/server.js`. Required variables: `DB_USER`, `DB_HOST`, `DB_NAME`, `DB_PASSWORD`, `DB_PORT`, `JWT_SECRET`. `src/server.js` reads `PORT` from `process.env.PORT`, falling back to `5000` when unset — local dev and CI never set `PORT`, so both still run on 5000; Render assigns its own via the injected env var. Two more optional variables exist for production only: `DB_SSL` (`"true"` enables `{ rejectUnauthorized: false }` in `src/db.js`'s `pg` `Pool` — required by Render's managed Postgres, unset/absent everywhere else) and `RENDER_SYNC_HOOK_URL` (a GitHub Actions secret, not a `.env` var — see Deployment below).
 
 ## Architecture
 
@@ -59,19 +59,24 @@ Standard layered Express structure under `src/`:
 
 ## Deployment
 
-Production runs on Render (free tier), defined as code in `render.yaml` (a Render Blueprint: one `web` service + one free Postgres database, wired together via `fromDatabase`). Deployment is **not** Render's native auto-deploy-on-push — it's gated behind CI. Migrations run in `buildCommand`, not `startCommand`/`preDeployCommand` — the free plan doesn't support `preDeployCommand`, and free services spin down after ~15 min idle, so anything in `startCommand` re-runs on every wake-from-sleep, not just on real deploys. The flow is: push to `main` → `.github/workflows/ci.yml`'s `test` job runs Jest + Postman → only if that succeeds does the `deploy` job `curl` a Render webhook. A push that fails CI never reaches Render.
+Production runs on Render (free tier), defined as code in `render.yaml` (a Render Blueprint: one `web` service + one free Postgres database, wired together via `fromDatabase`). Deployment is **not** Render's native auto-deploy-on-push — it's gated behind CI. Migrations run in `buildCommand`, not `startCommand`/`preDeployCommand` — the free plan doesn't support `preDeployCommand`, and free services spin down after ~15 min idle, so anything in `startCommand` re-runs on every wake-from-sleep, not just on real deploys. The flow is: push to `main` → `.github/workflows/ci.yml`'s `test` job runs Jest + Postman → only if that succeeds does the `deploy` job `curl`s Render's **Sync Hook** (not a per-service Deploy Hook — see below). A push that fails CI never reaches Render.
 
 **Two separate auto-deploy switches exist, both must stay off, or CI gating is bypassed:**
 - `autoDeployTrigger: off` on the web service itself, in `render.yaml`.
-- **Blueprint-level Auto-Sync**, in the Render dashboard on the Blueprint's own page (not the service's page) — Render's default is to sync/redeploy on every push to the linked branch, independently of the per-service setting above. This must be turned off manually in the dashboard; it isn't expressible in `render.yaml`. Verified off as of 2026-09-02.
+- **Blueprint-level Auto-Sync**, in the Render dashboard on the Blueprint's own page (not the service's page) — Render's default is to sync/redeploy on every push to the linked branch, independently of the per-service setting above. This must be turned off manually in the dashboard; it isn't expressible in `render.yaml`, so nothing catches it if it silently gets re-enabled. Verified off as of 2026-09-02 — worth re-checking occasionally, since a flipped toggle here would bypass CI gating with no error anywhere.
 
 One-time setup (manual, in the Render dashboard — not scriptable from here):
 1. Render dashboard → New → Blueprint → connect this GitHub repo. Render reads `render.yaml` and creates the `kanban-db` database and `kanban-backend` web service.
 2. Set `JWT_SECRET` on the web service (Render dashboard → service → Environment) — it's `sync: false` in the blueprint, i.e. deliberately not stored in the repo.
 3. Turn off Auto-Sync on the Blueprint's own dashboard page (see above).
-4. Copy the trigger URL: Blueprint page → **Sync Hook** (`https://api.render.com/sync/exs-...`) — not the individual service's Deploy Hook (`https://api.render.com/deploy/srv-...`); for a Blueprint-managed service the sync hook is what re-reads `render.yaml` and redeploys. `gh secret set RENDER_DEPLOY_HOOK_URL` (or GitHub repo Settings → Secrets → Actions) with that value.
+4. Copy the trigger URL from the **Blueprint's** page → **Sync Hook** (`https://api.render.com/sync/exs-...`) — deliberately *not* the individual web service's Deploy Hook (`https://api.render.com/deploy/srv-...`); for a Blueprint-managed service the sync hook is what re-reads `render.yaml` and redeploys. Regenerating this secret later, go by the URL shape (`/sync/exs-...`), not just "whatever hook Render shows me" — the service's own Deploy Hook URL will also `curl` successfully (2xx) but silently stops enforcing the Blueprint-level gating this setup relies on. Set it with `gh secret set RENDER_SYNC_HOOK_URL "<the sync hook URL>"` (or GitHub repo Settings → Secrets and variables → Actions) — this must match the `secrets.RENDER_SYNC_HOOK_URL` name `ci.yml` references.
 
 Verified working end-to-end on 2026-09-02: CI passing on `main` → `deploy` job → Render sync → live service confirmed reachable (`/test-db` returns a real Postgres row after free-tier cold start).
+
+**Known follow-ups, not yet done:**
+- Render's free Postgres plan **expires after 30 days** and needs manual renewal in the dashboard — not automated, not alerted; a lapsed database will take the API down until someone notices and renews it.
+- CORS is still hardcoded to `http://localhost:3000` in `src/server.js` (see Architecture above) — a deployed frontend can't call this deployed backend until that's made configurable.
+- Branch protection / required-status-checks on `main` isn't confirmed configured — nothing currently stops a direct push to `main` (bypassing the Git workflow rule above) from also bypassing CI before it reaches Render.
 
 ## Testing notes
 
