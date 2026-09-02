@@ -86,7 +86,11 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     steps:
-      - name: Trigger Render deploy hook
+      # This must be the Blueprint's Sync Hook (api.render.com/sync/exs-...), not a
+      # per-service Deploy Hook (api.render.com/deploy/srv-...) -- see CLAUDE.md's
+      # Deployment section. Both return 2xx, but only the sync hook re-reads
+      # render.yaml through the Blueprint, which is what CI gating relies on.
+      - name: Trigger Render sync hook
         env:
-          RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
-        run: curl -fsS -X POST "$RENDER_DEPLOY_HOOK_URL"
+          RENDER_SYNC_HOOK_URL: ${{ secrets.RENDER_SYNC_HOOK_URL }}
+        run: curl -fsS -X POST "$RENDER_SYNC_HOOK_URL"
