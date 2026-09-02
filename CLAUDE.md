@@ -6,6 +6,7 @@ Domain-specific documentation lives in nested `CLAUDE.md` files, loaded automati
 
 - `src/controllers/CLAUDE.md` — data model (all table schemas), and business rules per domain (auth, companies, projects, tasks incl. detail fields/hierarchy/relations/comments, sprints, board & backlog, retrospectives).
 - `migrations/CLAUDE.md` — migration mechanics (numbering, transactional apply, never-edit-an-applied-migration).
+- `specs/CLAUDE.md` — spec-driven development convention: when to write a spec, the template to copy, and its lifecycle from draft through merging into the docs above.
 
 ## Project
 
@@ -28,11 +29,13 @@ No lint script is configured.
 
 `dev` is branch-protected on GitHub ("Changes must be made through a pull request") and `master` presumably more so. **Never push or merge directly into `dev` or `master`** — do all work on a feature branch cut from `dev` (e.g. `feature/<name>`) and open a PR back into `dev` instead, even if a direct push would technically succeed for an admin account. If a push is rejected or bypasses the rule with a warning, treat that as a sign to stop and go through a PR rather than proceeding.
 
+**Cut the feature branch before the first edit, not before the first push.** If `git branch --show-current` reports `dev` or `master` at the start of a task, create/switch to a feature branch before touching any file — including docs-only changes (e.g. editing this file, adding a `specs/` entry). Don't let edits accumulate uncommitted on `dev` on the assumption they'll be moved to a branch later.
+
 **Always review a PR right after opening it**, using the `/code-review` skill against that PR (`/code-review ultra <PR#>` for a deeper multi-agent pass on larger/riskier changes) — don't wait to be asked. This is a manual, on-demand review done by invoking the skill, not an automated GitHub Action/bot; no CI workflow should be added for this unless explicitly requested. Report findings back in chat, or post them as inline PR comments with `--comment` when useful.
 
 ## Environment
 
-Config is loaded via `dotenv` from a `.env` file (gitignored) at the project root, read in both `src/db.js` and `src/server.js`. Required variables: `DB_USER`, `DB_HOST`, `DB_NAME`, `DB_PASSWORD`, `DB_PORT`, `JWT_SECRET`. Note `src/server.js` hardcodes `PORT = 5000` rather than reading `process.env.PORT` — this is intentional, the app runs on 5000.
+Config is loaded via `dotenv` from a `.env` file (gitignored) at the project root, read in both `src/db.js` and `src/server.js`. Required variables: `DB_USER`, `DB_HOST`, `DB_NAME`, `DB_PASSWORD`, `DB_PORT`, `JWT_SECRET`. `src/server.js` reads `PORT` from `process.env.PORT`, falling back to `5000` when unset — local dev and CI never set `PORT`, so both still run on 5000; Render assigns its own via the injected env var. Two more optional variables exist for production only: `DB_SSL` (`"true"` enables `{ rejectUnauthorized: false }` in `src/db.js`'s `pg` `Pool` — required by Render's managed Postgres, unset/absent everywhere else) and `RENDER_DEPLOY_HOOK_URL` (a GitHub Actions secret, not a `.env` var — see Deployment below).
 
 ## Architecture
 
@@ -53,6 +56,17 @@ Standard layered Express structure under `src/`:
 ## Postman / Newman (API-level QA suite)
 
 `postman/` holds a generated Postman collection (155 requests across 10 ordered folders) that exercises the whole API end-to-end against a real running server — complementary to the Jest suites above, which mock `src/db` and never hit Postgres. See `postman/README.md` for how it's organized, how to run it, and how to regenerate it after an endpoint changes. CI runs it with Newman on every push/PR, after the Jest step.
+
+## Deployment
+
+Production runs on Render (free tier), defined as code in `render.yaml` (a Render Blueprint: one `web` service + one free Postgres database, wired together via `fromDatabase`). Deployment is **not** Render's native auto-deploy-on-push (`autoDeploy: false` in the blueprint) — it's gated behind CI. The flow is: push to `main` → `.github/workflows/ci.yml`'s `test` job runs Jest + Postman → only if that succeeds does the `deploy` job `curl` Render's Deploy Hook URL. A push that fails CI never reaches Render.
+
+One-time setup (manual, in the Render dashboard — not scriptable from here):
+1. Render dashboard → New → Blueprint → connect this GitHub repo. Render reads `render.yaml` and creates the `kanban-db` database and `kanban-backend` web service.
+2. Set `JWT_SECRET` on the web service (Render dashboard → service → Environment) — it's `sync: false` in the blueprint, i.e. deliberately not stored in the repo.
+3. Web service → Settings → Deploy Hook → copy the URL, then `gh secret set RENDER_DEPLOY_HOOK_URL` (or GitHub repo Settings → Secrets → Actions) with that value.
+
+See `specs/render-deploy-ci-gating.md` for the reasoning behind these choices (branch, DB provisioning, why `autoDeploy` is off).
 
 ## Testing notes
 

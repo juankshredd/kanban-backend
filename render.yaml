@@ -1,0 +1,43 @@
+databases:
+  - name: kanban-db
+    plan: free
+    databaseName: kanban
+    user: kanban
+
+services:
+  - type: web
+    name: kanban-backend
+    runtime: node
+    plan: free
+    branch: main
+    autoDeploy: false
+    buildCommand: npm ci
+    startCommand: npm run migrate && npm start
+    healthCheckPath: /test-db
+    envVars:
+      - key: NODE_VERSION
+        value: 20.19.0
+      - key: DB_HOST
+        fromDatabase:
+          name: kanban-db
+          property: host
+      - key: DB_PORT
+        fromDatabase:
+          name: kanban-db
+          property: port
+      - key: DB_NAME
+        fromDatabase:
+          name: kanban-db
+          property: database
+      - key: DB_USER
+        fromDatabase:
+          name: kanban-db
+          property: user
+      - key: DB_PASSWORD
+        fromDatabase:
+          name: kanban-db
+          property: password
+      - key: DB_SSL
+        value: "true"
+      - key: JWT_SECRET
+        sync: false
