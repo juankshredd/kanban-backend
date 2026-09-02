@@ -10,9 +10,9 @@ services:
     runtime: node
     plan: free
     branch: main
-    autoDeploy: false
-    buildCommand: npm ci
-    startCommand: npm run migrate && npm start
+    autoDeployTrigger: off
+    buildCommand: npm ci && npm run migrate
+    startCommand: npm start
     healthCheckPath: /test-db
     envVars:
       - key: NODE_VERSION
