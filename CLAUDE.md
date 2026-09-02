@@ -27,9 +27,9 @@ No lint script is configured.
 
 ## Git workflow
 
-`dev` is branch-protected on GitHub ("Changes must be made through a pull request") and `master` presumably more so. **Never push or merge directly into `dev` or `master`** — do all work on a feature branch cut from `dev` (e.g. `feature/<name>`) and open a PR back into `dev` instead, even if a direct push would technically succeed for an admin account. If a push is rejected or bypasses the rule with a warning, treat that as a sign to stop and go through a PR rather than proceeding.
+`dev` is branch-protected on GitHub ("Changes must be made through a pull request") and `main` (the default branch, merged into from `dev` via PR) presumably more so — a direct push to `main` now also triggers a real production deploy on Render via CI, see Deployment below. **Never push or merge directly into `dev` or `main`** — do all work on a feature branch cut from `dev` (e.g. `feature/<name>`) and open a PR back into `dev` instead, even if a direct push would technically succeed for an admin account. If a push is rejected or bypasses the rule with a warning, treat that as a sign to stop and go through a PR rather than proceeding. (A local `master` branch may exist from before the project was renamed to `main` — it isn't on GitHub and isn't part of this workflow.)
 
-**Cut the feature branch before the first edit, not before the first push.** If `git branch --show-current` reports `dev` or `master` at the start of a task, create/switch to a feature branch before touching any file — including docs-only changes (e.g. editing this file, adding a `specs/` entry). Don't let edits accumulate uncommitted on `dev` on the assumption they'll be moved to a branch later.
+**Cut the feature branch before the first edit, not before the first push.** If `git branch --show-current` reports `dev` or `main` at the start of a task, create/switch to a feature branch before touching any file — including docs-only changes (e.g. editing this file, adding a `specs/` entry). Don't let edits accumulate uncommitted on `dev` on the assumption they'll be moved to a branch later.
 
 **Always review a PR right after opening it**, using the `/code-review` skill against that PR (`/code-review ultra <PR#>` for a deeper multi-agent pass on larger/riskier changes) — don't wait to be asked. This is a manual, on-demand review done by invoking the skill, not an automated GitHub Action/bot; no CI workflow should be added for this unless explicitly requested. Report findings back in chat, or post them as inline PR comments with `--comment` when useful.
 
@@ -59,14 +59,19 @@ Standard layered Express structure under `src/`:
 
 ## Deployment
 
-Production runs on Render (free tier), defined as code in `render.yaml` (a Render Blueprint: one `web` service + one free Postgres database, wired together via `fromDatabase`). Deployment is **not** Render's native auto-deploy-on-push (`autoDeploy: false` in the blueprint) — it's gated behind CI. The flow is: push to `main` → `.github/workflows/ci.yml`'s `test` job runs Jest + Postman → only if that succeeds does the `deploy` job `curl` Render's Deploy Hook URL. A push that fails CI never reaches Render.
+Production runs on Render (free tier), defined as code in `render.yaml` (a Render Blueprint: one `web` service + one free Postgres database, wired together via `fromDatabase`). Deployment is **not** Render's native auto-deploy-on-push — it's gated behind CI. Migrations run in `buildCommand`, not `startCommand`/`preDeployCommand` — the free plan doesn't support `preDeployCommand`, and free services spin down after ~15 min idle, so anything in `startCommand` re-runs on every wake-from-sleep, not just on real deploys. The flow is: push to `main` → `.github/workflows/ci.yml`'s `test` job runs Jest + Postman → only if that succeeds does the `deploy` job `curl` a Render webhook. A push that fails CI never reaches Render.
+
+**Two separate auto-deploy switches exist, both must stay off, or CI gating is bypassed:**
+- `autoDeployTrigger: off` on the web service itself, in `render.yaml`.
+- **Blueprint-level Auto-Sync**, in the Render dashboard on the Blueprint's own page (not the service's page) — Render's default is to sync/redeploy on every push to the linked branch, independently of the per-service setting above. This must be turned off manually in the dashboard; it isn't expressible in `render.yaml`. Verified off as of 2026-09-02.
 
 One-time setup (manual, in the Render dashboard — not scriptable from here):
 1. Render dashboard → New → Blueprint → connect this GitHub repo. Render reads `render.yaml` and creates the `kanban-db` database and `kanban-backend` web service.
 2. Set `JWT_SECRET` on the web service (Render dashboard → service → Environment) — it's `sync: false` in the blueprint, i.e. deliberately not stored in the repo.
-3. Web service → Settings → Deploy Hook → copy the URL, then `gh secret set RENDER_DEPLOY_HOOK_URL` (or GitHub repo Settings → Secrets → Actions) with that value.
+3. Turn off Auto-Sync on the Blueprint's own dashboard page (see above).
+4. Copy the trigger URL: Blueprint page → **Sync Hook** (`https://api.render.com/sync/exs-...`) — not the individual service's Deploy Hook (`https://api.render.com/deploy/srv-...`); for a Blueprint-managed service the sync hook is what re-reads `render.yaml` and redeploys. `gh secret set RENDER_DEPLOY_HOOK_URL` (or GitHub repo Settings → Secrets → Actions) with that value.
 
-See `specs/render-deploy-ci-gating.md` for the reasoning behind these choices (branch, DB provisioning, why `autoDeploy` is off).
+Verified working end-to-end on 2026-09-02: CI passing on `main` → `deploy` job → Render sync → live service confirmed reachable (`/test-db` returns a real Postgres row after free-tier cold start).
 
 ## Testing notes
 
@@ -76,8 +81,8 @@ See `specs/render-deploy-ci-gating.md` for the reasoning behind these choices (b
 
 Every controller in `src/controllers/` has a sibling `*.test.js` (e.g. `companyController.js` → `companyController.test.js`) of **unit** tests — distinct from `sample.test.js` above: no Express, no Supertest, no real DB. `src/db.js` is replaced with `jest.mock('../db', () => ({ connect: jest.fn(), query: jest.fn() }))`, and each handler is called directly with a hand-built `req`/`res` (`res.status`/`res.json` as `jest.fn().mockReturnValue(res)` so they chain). Handlers that use a transaction (`pool.connect()`) get a fake `client` (`{ query: jest.fn(), release: jest.fn() }`) returned from `pool.connect.mockResolvedValue(client)`, with `client.query` mocked once per statement in call order (`BEGIN`, the actual queries, `COMMIT`).
 
-**Rule: every new exported controller function must ship with at least 1 happy-path test and 1 negative test in the same commit**, following the existing pattern in that controller's test file (see any `describe('controllerName.functionName', ...)` block for the shape to copy). No commit — and no push to a shared branch (`dev`/`master`) — should introduce a new controller function without matching tests. This is deliberately unit-level and fast (no DB dependency) so it's cheap to run on every change; it complements, not replaces, `sample.test.js`-style integration coverage for critical end-to-end flows.
+**Rule: every new exported controller function must ship with at least 1 happy-path test and 1 negative test in the same commit**, following the existing pattern in that controller's test file (see any `describe('controllerName.functionName', ...)` block for the shape to copy). No commit — and no push to a shared branch (`dev`/`main`) — should introduce a new controller function without matching tests. This is deliberately unit-level and fast (no DB dependency) so it's cheap to run on every change; it complements, not replaces, `sample.test.js`-style integration coverage for critical end-to-end flows.
 
 ### CI
 
-`.github/workflows/ci.yml` runs the full Jest suite (unit + `sample.test.js` integration test) on every push and pull request targeting `master` or `dev`, against a real ephemeral `postgres:16` service container — it applies migrations (`npm run migrate`) and seeds the integration test user (`npm run seed:test`) before running `npx jest`, so both test styles run for real in CI, not just locally. Coverage is uploaded as a build artifact. Treat a failing "Test" check as a hard blocker for merging, same as the no-tests-no-commit rule above.
+`.github/workflows/ci.yml` runs the full Jest suite (unit + `sample.test.js` integration test) on every push and pull request targeting `main` or `dev`, against a real ephemeral `postgres:16` service container — it applies migrations (`npm run migrate`) and seeds the integration test user (`npm run seed:test`) before running `npx jest`, so both test styles run for real in CI, not just locally. Coverage is uploaded as a build artifact. Treat a failing "Test" check as a hard blocker for merging, same as the no-tests-no-commit rule above.
