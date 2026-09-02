@@ -59,14 +59,19 @@ Standard layered Express structure under `src/`:
 
 ## Deployment
 
-Production runs on Render (free tier), defined as code in `render.yaml` (a Render Blueprint: one `web` service + one free Postgres database, wired together via `fromDatabase`). Deployment is **not** Render's native auto-deploy-on-push (`autoDeployTrigger: off` in the blueprint) — it's gated behind CI. Migrations run in `buildCommand`, not `startCommand`/`preDeployCommand` — the free plan doesn't support `preDeployCommand`, and free services spin down after ~15 min idle, so anything in `startCommand` re-runs on every wake-from-sleep, not just on real deploys. The flow is: push to `main` → `.github/workflows/ci.yml`'s `test` job runs Jest + Postman → only if that succeeds does the `deploy` job `curl` Render's Deploy Hook URL. A push that fails CI never reaches Render.
+Production runs on Render (free tier), defined as code in `render.yaml` (a Render Blueprint: one `web` service + one free Postgres database, wired together via `fromDatabase`). Deployment is **not** Render's native auto-deploy-on-push — it's gated behind CI. Migrations run in `buildCommand`, not `startCommand`/`preDeployCommand` — the free plan doesn't support `preDeployCommand`, and free services spin down after ~15 min idle, so anything in `startCommand` re-runs on every wake-from-sleep, not just on real deploys. The flow is: push to `main` → `.github/workflows/ci.yml`'s `test` job runs Jest + Postman → only if that succeeds does the `deploy` job `curl` a Render webhook. A push that fails CI never reaches Render.
+
+**Two separate auto-deploy switches exist, both must stay off, or CI gating is bypassed:**
+- `autoDeployTrigger: off` on the web service itself, in `render.yaml`.
+- **Blueprint-level Auto-Sync**, in the Render dashboard on the Blueprint's own page (not the service's page) — Render's default is to sync/redeploy on every push to the linked branch, independently of the per-service setting above. This must be turned off manually in the dashboard; it isn't expressible in `render.yaml`. Verified off as of 2026-09-02.
 
 One-time setup (manual, in the Render dashboard — not scriptable from here):
 1. Render dashboard → New → Blueprint → connect this GitHub repo. Render reads `render.yaml` and creates the `kanban-db` database and `kanban-backend` web service.
 2. Set `JWT_SECRET` on the web service (Render dashboard → service → Environment) — it's `sync: false` in the blueprint, i.e. deliberately not stored in the repo.
-3. Web service → Settings → Deploy Hook → copy the URL, then `gh secret set RENDER_DEPLOY_HOOK_URL` (or GitHub repo Settings → Secrets → Actions) with that value.
+3. Turn off Auto-Sync on the Blueprint's own dashboard page (see above).
+4. Copy the trigger URL: Blueprint page → **Sync Hook** (`https://api.render.com/sync/exs-...`) — not the individual service's Deploy Hook (`https://api.render.com/deploy/srv-...`); for a Blueprint-managed service the sync hook is what re-reads `render.yaml` and redeploys. `gh secret set RENDER_DEPLOY_HOOK_URL` (or GitHub repo Settings → Secrets → Actions) with that value.
 
-See `specs/render-deploy-ci-gating.md` for the reasoning behind these choices (branch, DB provisioning, why `autoDeploy` is off).
+Verified working end-to-end on 2026-09-02: CI passing on `main` → `deploy` job → Render sync → live service confirmed reachable (`/test-db` returns a real Postgres row after free-tier cold start).
 
 ## Testing notes
 
