@@ -41,3 +41,5 @@ services:
         value: "true"
       - key: JWT_SECRET
         sync: false
+      - key: CORS_ORIGIN
+        sync: false
