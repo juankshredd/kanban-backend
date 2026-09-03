@@ -67,7 +67,7 @@ Production runs on Render (free tier), defined as code in `render.yaml` (a Rende
 
 One-time setup (manual, in the Render dashboard — not scriptable from here):
 1. Render dashboard → New → Blueprint → connect this GitHub repo. Render reads `render.yaml` and creates the `kanban-db` database and `kanban-backend` web service.
-2. Set `JWT_SECRET` and `CORS_ORIGIN` (the deployed frontend's URL, e.g. `https://kanban-frontend-ecru-phi.vercel.app`) on the web service (Render dashboard → service → Environment) — both are `sync: false` in the blueprint, i.e. deliberately not stored in the repo.
+2. Set `JWT_SECRET` and `CORS_ORIGIN` (the deployed frontend's URL, e.g. `https://kanban-frontend-ecru-phi.vercel.app`) on the web service (Render dashboard → service → Environment) — both are `sync: false` in the blueprint, i.e. deliberately not stored in the repo. `CORS_ORIGIN` must be an origin only (scheme + host, no path like `/login` and no trailing slash) — the browser's `Origin` header never includes a path, so a value with one appended silently fails to match and reproduces the CORS error. Because it's `sync: false`, merging and deploying the code that reads it does **not** set it on Render — it has to be added by hand in this step, and skipping it leaves prod CORS broken even though the code is correct (bit us on 2026-09-02, see follow-up below).
 3. Turn off Auto-Sync on the Blueprint's own dashboard page (see above).
 4. Copy the trigger URL from the **Blueprint's** page → **Sync Hook** (`https://api.render.com/sync/exs-...`) — deliberately *not* the individual web service's Deploy Hook (`https://api.render.com/deploy/srv-...`); for a Blueprint-managed service the sync hook is what re-reads `render.yaml` and redeploys. Regenerating this secret later, go by the URL shape (`/sync/exs-...`), not just "whatever hook Render shows me" — the service's own Deploy Hook URL will also `curl` successfully (2xx) but silently stops enforcing the Blueprint-level gating this setup relies on. Set it with `gh secret set RENDER_SYNC_HOOK_URL "<the sync hook URL>"` (or GitHub repo Settings → Secrets and variables → Actions) — this must match the `secrets.RENDER_SYNC_HOOK_URL` name `ci.yml` references.
 
@@ -76,6 +76,7 @@ Verified working end-to-end on 2026-09-02: CI passing on `main` → `deploy` job
 **Known follow-ups, not yet done:**
 - Render's free Postgres plan **expires after 30 days** and needs manual renewal in the dashboard — not automated, not alerted; a lapsed database will take the API down until someone notices and renews it.
 - Branch protection / required-status-checks on `main` isn't confirmed configured — nothing currently stops a direct push to `main` (bypassing the Git workflow rule above) from also bypassing CI before it reaches Render.
+- On 2026-09-02, `CORS_ORIGIN` support was merged and deployed to `main` (CI green, Render sync succeeded) but the env var itself had never been set on the Render dashboard, so production register/login kept failing with a CORS preflight error for a while after the "fix" had already shipped. Fixed by setting it manually per step 2 above; there's no CI/deploy-time check that catches an unset `sync: false` var, so this can recur (e.g. after recreating the service, or the frontend moving to a new domain).
 
 ## Testing notes
 
