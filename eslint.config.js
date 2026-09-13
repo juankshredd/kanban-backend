@@ -24,6 +24,6 @@ module.exports = [
     },
   },
   {
-    ignores: ['node_modules/', 'coverage/', 'postman/*.postman_collection.json'],
+    ignores: ['node_modules/', 'coverage/'],
   },
 ];
