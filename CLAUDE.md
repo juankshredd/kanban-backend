@@ -21,7 +21,7 @@ Express + PostgreSQL REST API backend for a Kanban board app (`kanban-backend`).
 - Coverage is collected automatically on every Jest run (`collectCoverage: true` in `jest.config.js`), output to `coverage/`
 - Apply pending DB migrations: `npm run migrate` — check what's applied vs. pending with `npm run migrate:status`
 
-No lint script is configured.
+- Run lint: `npm run lint` (ESLint, flat config in `eslint.config.js`) — also run in CI, before the test step.
 
 - Run the Postman/Newman API-level QA suite (requires the server running on port 5000): `npm run test:postman` — see `postman/README.md`. Regenerate the collection after changing an endpoint with `npm run postman:generate` (never hand-edit the generated JSON).
 

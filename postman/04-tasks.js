@@ -1,5 +1,5 @@
 'use strict';
-const { lines, request, folder, asUserA, asUserB, asUserC, status, hasProp, messageIsString, bodyVar } = require('./helpers');
+const { lines, request, folder, asUserA, asUserB, asUserC, status, messageIsString, bodyVar } = require('./helpers');
 
 const tasksFolder = folder('04 - Tasks', [
   request('Create Task (canonical, under project)', 'POST', '{{baseUrl}}/projects/{{projectId}}/tasks', {
