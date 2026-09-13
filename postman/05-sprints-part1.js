@@ -1,5 +1,5 @@
 'use strict';
-const { lines, request, folder, asUserA, status, hasProp, messageIsString, bodyVar } = require('./helpers');
+const { lines, request, folder, asUserA, status, messageIsString, bodyVar } = require('./helpers');
 
 const sprintsPart1Folder = folder('05 - Sprints (part 1)', [
   request('Get Board - No Active Sprint Yet (negative)', 'GET', '{{baseUrl}}/projects/{{projectId}}/board', {

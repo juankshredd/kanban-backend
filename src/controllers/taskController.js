@@ -238,7 +238,7 @@ const createTask = async (req, res) => {
     detailsNormalized = value;
   }
 
-  let parentIdNormalized = null;
+  let parentIdNormalized;
   try {
     const { error: parentError, value } = await validateParentId(parent_id ?? null, typeNormalized, project_id);
 
@@ -254,7 +254,7 @@ const createTask = async (req, res) => {
     throw error;
   }
 
-  let assigneeIdNormalized = null;
+  let assigneeIdNormalized;
   try {
     const { error: assigneeError, value } = await validateAssigneeId(assignee_id ?? null, project_id);
 
